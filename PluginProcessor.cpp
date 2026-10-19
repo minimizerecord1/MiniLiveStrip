@@ -232,11 +232,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout MiniLiveStripProcessor::crea
 
     layout.add (std::make_unique<AudioParameterFloat> (
         ParameterID { "q", 1 }, "Notch Q (higher = narrower)",
-        NormalisableRange<float> (4.0f, 60.0f, 0.1f, 0.5f), 30.0f));
+        NormalisableRange<float> (4.0f, 60.0f, 0.1f, 0.5f), 60.0f));
 
     layout.add (std::make_unique<AudioParameterFloat> (
         ParameterID { "maxDepth", 1 }, "Depth (dB)",
-        NormalisableRange<float> (3.0f, 60.0f, 0.1f), 15.0f));
+        NormalisableRange<float> (3.0f, 60.0f, 0.1f), 60.0f));
 
     layout.add (std::make_unique<AudioParameterBool> (
         ParameterID { "scan", 1 }, "Scan Feedback", false));
@@ -856,13 +856,15 @@ void MiniLiveStripProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             const bool   bandPass = (type == 4 || type == 5 || type == 6);
             const double bandQ    = juce::jmax (0.2, (double) pEqQ[i]->load());
             // Solo follows the band's Q: higher Q = narrower band-pass and steeper edges.
-            soloStagesB[i] = juce::jlimit (1, 4, 1 + (int) (bandQ / 2.5));
+            // Solo is tighter than the band itself: effective Q = 2.5 x band Q, slope 2..4 stages (24..48 dB/oct).
+            const double soloQ = 2.5 * bandQ;
+            soloStagesB[i] = juce::jlimit (2, 4, 2 + (int) (bandQ / 3.5));
             const double f        = juce::jlimit (10.0, 0.45 * fs, (double) pEqFreq[i]->load());
             const double w0      = 2.0 * juce::MathConstants<double>::pi * f / fs;
             const double cw      = std::cos (w0);
             const double sw      = std::sin (w0);
-            // Band-pass: the band's own Q sets the width (bandwidth = frequency / Q).
-            const double alpha   = sw / (2.0 * (bandPass ? bandQ : 0.7071));
+            // Band-pass: width from the solo Q (bandwidth = frequency / Q).
+            const double alpha   = sw / (2.0 * (bandPass ? soloQ : 0.7071));
 
             double b0 = 0.0, b1 = 0.0, b2 = 0.0;
             if (type == 0 || type == 2)                     // low-pass
