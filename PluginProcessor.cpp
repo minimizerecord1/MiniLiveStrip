@@ -15,8 +15,6 @@ MiniLiveStripProcessor::MiniLiveStripProcessor()
     pMaxDepth = apvts.getRawParameterValue ("maxDepth");
     pQ        = apvts.getRawParameterValue ("q");
     pSoloLevel = apvts.getRawParameterValue ("soloLevel");
-    pSoloWidth = apvts.getRawParameterValue ("soloWidth");
-    pSoloSlope = apvts.getRawParameterValue ("soloSlope");
     pGrowth   = apvts.getRawParameterValue ("growth");
     pScan     = apvts.getRawParameterValue ("scan");
     pReset    = apvts.getRawParameterValue ("reset");
@@ -426,12 +424,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout MiniLiveStripProcessor::crea
     layout.add (std::make_unique<AudioParameterFloat> (
         ParameterID { "soloLevel", 1 }, "Solo Level", NormalisableRange<float> (-24.0f, 12.0f, 0.1f), 0.0f));
 
-    layout.add (std::make_unique<AudioParameterFloat> (
-        ParameterID { "soloWidth", 1 }, "Solo Width (oct)", NormalisableRange<float> (0.1f, 4.0f, 0.01f, 0.5f), 1.0f));
-
-    layout.add (std::make_unique<AudioParameterInt> (
-        ParameterID { "soloSlope", 1 }, "Solo Slope (stages)", 1, 4, 2));
-
     return layout;
 }
 
@@ -792,8 +784,8 @@ void MiniLiveStripProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     settings.q           = pQ->load();
     settings.growthCheck = pGrowth->load() > 0.5f;
 
-    // Feedback off = frozen. (Detection is always automatic when Feedback is on.)
-    settings.locked      = ! fbOn;
+    // Scan off or Feedback off = frozen.
+    settings.locked      = pScan->load() < 0.5f || ! fbOn;
 
     // Growth Check: the peak has to persist (and grow) for the "Growth time".
     settings.requiredFrames = settings.growthCheck
@@ -845,7 +837,6 @@ void MiniLiveStripProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         //   Low Shelf / Low Cut   -> everything below the frequency (low-pass)
         //   High Shelf / High Cut -> everything above the frequency (high-pass)
         //   Bell / Tilt / Notch   -> a band-pass around the frequency, width from the band's Q
-        soloStages = juce::jlimit (1, 4, (int) std::lround (pSoloSlope->load()));
         bool any = false;
         for (int b = 0; b < kNumEqBands; ++b)
         {
@@ -863,15 +854,15 @@ void MiniLiveStripProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
             const int    type     = (int) std::lround (pEqType[i]->load());
             const bool   bandPass = (type == 4 || type == 5 || type == 6);
+            const double bandQ    = juce::jmax (0.2, (double) pEqQ[i]->load());
+            // Solo follows the band's Q: higher Q = narrower band-pass and steeper edges.
+            soloStagesB[i] = juce::jlimit (1, 4, 1 + (int) (bandQ / 2.5));
             const double f        = juce::jlimit (10.0, 0.45 * fs, (double) pEqFreq[i]->load());
             const double w0      = 2.0 * juce::MathConstants<double>::pi * f / fs;
             const double cw      = std::cos (w0);
             const double sw      = std::sin (w0);
-            // Band-pass Q from the width in octaves: Q = sqrt(2^bw) / (2^bw - 1).
-            const double bwOct = juce::jlimit (0.1, 4.0, (double) pSoloWidth->load());
-            const double p2    = std::pow (2.0, bwOct);
-            const double q     = std::sqrt (p2) / (p2 - 1.0);
-            const double alpha   = sw / (2.0 * (bandPass ? q : 0.7071));
+            // Band-pass: the band's own Q sets the width (bandwidth = frequency / Q).
+            const double alpha   = sw / (2.0 * (bandPass ? bandQ : 0.7071));
 
             double b0 = 0.0, b1 = 0.0, b2 = 0.0;
             if (type == 0 || type == 2)                     // low-pass
@@ -948,7 +939,7 @@ void MiniLiveStripProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         auto soloChain = [&] (size_t bi, size_t ch, float x) -> float
         {
             double y = (double) x;
-            for (size_t st = 0; st < (size_t) soloStages; ++st)
+            for (size_t st = 0; st < (size_t) soloStagesB[bi]; ++st)
                 y = soloRun (soloC[bi][st], soloZ[ch][bi][st], (float) y);
             return (float) y;
         };

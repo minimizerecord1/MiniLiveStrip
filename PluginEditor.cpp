@@ -3,7 +3,6 @@
 
 namespace
 {
-    const juce::Colour kThresholdColour (0xffffd54a);   // yellow: detection threshold
     const juce::Colour kNotchColour     (0xffff5a4a);   // red: notches / Q curve
     const juce::Colour kEqColour        (0xff7cf29a);   // green: EQ curve
     const juce::Colour kAccent          (0xffffb020);
@@ -278,6 +277,53 @@ void ReductionMeter::setValue (float reductionDb)
     repaint();
 }
 
+juce::Rectangle<float> ReductionMeter::barRect() const
+{
+    return getLocalBounds().toFloat().withTrimmedLeft ((float) kGutter).reduced (1.5f);
+}
+
+float ReductionMeter::yForDepth (float db) const
+{
+    const auto in = barRect();
+    return in.getY() + in.getHeight() * juce::jlimit (0.0f, 1.0f, db / juce::jmax (1.0f, range));
+}
+
+void ReductionMeter::mouseMove (const juce::MouseEvent& e)
+{
+    const bool onMarker = markerDraggable && markDb >= 0.0f
+                          && std::abs (e.position.y - yForDepth (markDb)) <= 6.0f;
+    setMouseCursor (onMarker ? juce::MouseCursor::UpDownResizeCursor : juce::MouseCursor::NormalCursor);
+}
+
+void ReductionMeter::mouseDown (const juce::MouseEvent& e)
+{
+    if (! markerDraggable || markDb < 0.0f || std::abs (e.position.y - yForDepth (markDb)) > 6.0f)
+        return;
+
+    draggingMarker = true;
+    if (onMarkerDragState) onMarkerDragState (true);
+    mouseDrag (e);
+}
+
+void ReductionMeter::mouseDrag (const juce::MouseEvent& e)
+{
+    if (! draggingMarker || ! onMarkerDrag)
+        return;
+
+    const auto in = barRect();
+    const float depth = (e.position.y - in.getY()) / juce::jmax (1.0f, in.getHeight()) * range;
+    onMarkerDrag (juce::jlimit (0.0f, range, depth));
+}
+
+void ReductionMeter::mouseUp (const juce::MouseEvent&)
+{
+    if (! draggingMarker)
+        return;
+
+    draggingMarker = false;
+    if (onMarkerDragState) onMarkerDragState (false);
+}
+
 void ReductionMeter::paint (juce::Graphics& g)
 {
     const auto full = getLocalBounds().toFloat();
@@ -320,7 +366,7 @@ void ReductionMeter::paint (juce::Graphics& g)
     }
 
     // marker (depth / ratio): dashed line over the bar + label in the gutter
-    if (markDb > 0.05f && markDb <= range + 0.01f)
+    if (markDb >= 0.0f && markDb <= range + 0.01f)
     {
         const float y = yFor (markDb);
         const float dashes[] = { 3.0f, 2.0f };
@@ -331,6 +377,9 @@ void ReductionMeter::paint (juce::Graphics& g)
         juce::PathStrokeType (1.4f).createDashedStroke (dashed, line, dashes, 2);
         g.setColour (juce::Colours::white);
         g.fillPath (dashed);
+
+        if (markerDraggable)                                 // fader handle: a solid bar you can grab
+            g.fillRoundedRectangle (in.getX(), y - 1.5f, in.getWidth(), 3.0f, 1.0f);
 
         const auto pill = juce::Rectangle<float> (full.getX(), y - 5.5f, (float) kGutter - 2.0f, 11.0f);
         g.setColour (juce::Colour (0xff0b0d0f));
@@ -800,6 +849,12 @@ MiniLiveStripEditor::MiniLiveStripEditor (MiniLiveStripProcessor& p)
 
     // ---- Suppressor buttons
 
+    scanBtn.setClickingTogglesState (true);
+    scanBtn.setLabel ("SCAN");
+    scanBtn.setColourOn (kAccent);
+    addAndMakeVisible (scanBtn);
+    buttonAtt.push_back (std::make_unique<juce::ButtonParameterAttachment> (*apvts.getParameter ("scan"), scanBtn, nullptr));
+
     growthBtn.setClickingTogglesState (true);
     growthBtn.setLabel ("GROWTH");
     growthBtn.setColourOn (kAccent);
@@ -807,7 +862,7 @@ MiniLiveStripEditor::MiniLiveStripEditor (MiniLiveStripProcessor& p)
     buttonAtt.push_back (std::make_unique<juce::ButtonParameterAttachment> (*apvts.getParameter ("growth"), growthBtn, nullptr));
 
     // Reset is momentary: set the parameter, the timer clears it once the audio thread handled it.
-    resetBtn.setLabel ("RESET FEEDBACK");
+    resetBtn.setLabel ("RESET");
     resetBtn.setColourOn (kAccent);
     resetBtn.onClick = [this]
     {
@@ -868,14 +923,6 @@ MiniLiveStripEditor::MiniLiveStripEditor (MiniLiveStripProcessor& p)
     }
 
     bandSoloBtn.setBounds (BandPopup::kW - 72, 3, 32, 17);   // popup-local coordinates
-    soloSubBtn.setClickingTogglesState (true);
-    soloSubBtn.setLabel ("SET");
-    soloSubBtn.setColourOn (kAccent);
-    soloSubBtn.setBounds (BandPopup::kW - 36, 3, 32, 17);
-    popup.addAndMakeVisible (soloSubBtn);
-    addChildComponent (soloSub);
-    soloSubAtt.push_back (std::make_unique<juce::SliderParameterAttachment> (*apvts.getParameter ("soloWidth"), soloSub.widthKnob, nullptr));
-    soloSubAtt.push_back (std::make_unique<juce::SliderParameterAttachment> (*apvts.getParameter ("soloSlope"), soloSub.slopeKnob, nullptr));
     popup.addAndMakeVisible (bandSoloBtn);
     // One click toggles solo for the selected band. Only one band can solo at a time.
     bandSoloBtn.onSoloToggled = [this] (bool on)
@@ -994,6 +1041,30 @@ MiniLiveStripEditor::MiniLiveStripEditor (MiniLiveStripProcessor& p)
     grMeter.setBarColour (kAccent);
     gateMeter.setScale (80.0f, 10.0f);
     gateMeter.setBarColour (kGateColour);
+    // GR meter fader: drag the marker line to set the limiter / compressor threshold.
+    grMeter.markerDraggable = true;
+    grMeter.onMarkerDragState = [this] (bool begin)
+    {
+        grThrComp  = proc.apvts.getRawParameterValue ("limMode")->load() > 0.5f;
+        grThrParam = proc.apvts.getParameter (grThrComp ? "compThresh" : "limThresh");
+        gesture (grThrParam, begin);
+    };
+    grMeter.onMarkerDrag = [this] (float depth)
+    {
+        if (grThrParam == nullptr)
+            return;
+
+        float thr = -depth;                                  // limiter: reduction at 0 dBFS = -threshold
+        if (grThrComp)                                        // compressor: reduction = -thr * (1 - 1/ratio)
+        {
+            const float ratio = proc.apvts.getRawParameterValue ("compRatio")->load();
+            const float k = 1.0f - 1.0f / juce::jmax (1.0f, ratio);
+            if (k < 0.05f)
+                return;                                       // ratio ~1: nothing to move
+            thr = -depth / k;
+        }
+        setPlain (grThrParam, thr);                           // snapped / clamped to the range
+    };
     addAndMakeVisible (grMeter);
     addAndMakeVisible (gateMeter);
     addAndMakeVisible (outMeter);
@@ -1204,6 +1275,8 @@ void MiniLiveStripEditor::layoutSub()
 
         constexpr int bh = 26;
         auto col = r.removeFromLeft (130);
+        scanBtn.setBounds (col.removeFromTop (bh));
+        col.removeFromTop (4);
         growthBtn.setBounds (col.removeFromTop (bh));
         col.removeFromTop (4);
         resetBtn.setBounds (col.removeFromTop (bh));
@@ -1233,7 +1306,7 @@ void MiniLiveStripEditor::updateModuleVisibility()
 {
     const bool fb = (openModule == 0);
 
-    for (auto* c : std::initializer_list<juce::Component*> { &fbBtn, &growthBtn, &resetBtn,
+    for (auto* c : std::initializer_list<juce::Component*> { &fbBtn, &scanBtn, &growthBtn, &resetBtn,
                                                               &sensitivity, &notchQ, &depth, &growthTime,
                                                               &subCloseBtn })
         c->setVisible (fb);
@@ -1391,7 +1464,7 @@ void MiniLiveStripEditor::updatePopupHover()
     else
     {
         const bool onBand = hoverBand == selectedBand || dragBand == selectedBand
-                            || popup.isMouseOverOrDragging (true) || soloSub.isMouseOverOrDragging (true);
+                            || popup.isMouseOverOrDragging (true);
         const auto now = juce::Time::getMillisecondCounter();
 
         if (onBand)
@@ -1412,14 +1485,6 @@ void MiniLiveStripEditor::updatePopupHover()
     popup.setAlpha (popupAlpha);
     popup.setVisible (popupAlpha > 0.0f);
 
-    // Solo sub-display: below the popup (above it if there is no room), follows the popup's fade.
-    const bool subOn = soloSubBtn.getToggleState() && popupAlpha > 0.0f;
-    soloSub.setAlpha (popupAlpha);
-    soloSub.setVisible (subOn);
-    if (subOn)
-    {
-        soloSub.setBounds (popupRect.withHeight (58).withY (popupRect.getY() - 62));
-    }
 }
 
 // Knob popup (Freq / Q / Gain) above the selected point; below it when there is no room above.
@@ -1827,6 +1892,18 @@ void MiniLiveStripEditor::mouseDown (const juce::MouseEvent& e)
     auto& ui = bands[(size_t) h];
     dragBand = h;
     dragGain = bandUsesGain (h);
+    dragCtrl = e.mods.isCtrlDown();
+
+    if (dragCtrl)                           // Ctrl + drag: horizontal = Q, vertical = gain, freq stays
+    {
+        ctrlQ0    = plainValue (ui.pQ);
+        ctrlGain0 = plainValue (ui.pGain);
+        gesture (ui.pQ, true);
+        if (dragGain)
+            gesture (ui.pGain, true);
+        return;
+    }
+
     gesture (ui.pFreq, true);
     if (dragGain)
         gesture (ui.pGain, true);
@@ -1837,9 +1914,24 @@ void MiniLiveStripEditor::mouseDrag (const juce::MouseEvent& e)
     if (dragBand < 0)
         return;
 
-    const auto g = makeGeom();
     auto& ui = bands[(size_t) dragBand];
 
+    if (dragCtrl)
+    {
+        const auto rq = ui.pQ->getNormalisableRange();
+        setPlain (ui.pQ, juce::jlimit (rq.start, rq.end, ctrlQ0 * std::exp (0.01f * (float) e.getDistanceFromDragStartX())));
+
+        if (dragGain)
+        {
+            const auto rg = ui.pGain->getNormalisableRange();
+            setPlain (ui.pGain, juce::jlimit (rg.start, rg.end, ctrlGain0 - 0.1f * (float) e.getDistanceFromDragStartY()));
+        }
+
+        layoutPopup();
+        return;
+    }
+
+    const auto g = makeGeom();
     setPlain (ui.pFreq, g.freqForX (e.position.x));
     if (dragGain)
         setPlain (ui.pGain, g.respForY (e.position.y));
@@ -1862,10 +1954,11 @@ void MiniLiveStripEditor::mouseUp (const juce::MouseEvent&)
         return;
 
     auto& ui = bands[(size_t) dragBand];
-    gesture (ui.pFreq, false);
+    gesture (dragCtrl ? ui.pQ : ui.pFreq, false);
     if (dragGain)
         gesture (ui.pGain, false);
 
+    dragCtrl = false;
     dragBand = -1;
 }
 
@@ -1906,8 +1999,38 @@ void MiniLiveStripEditor::mouseWheelMove (const juce::MouseEvent& e, const juce:
         return;
     }
 
-    // Scroll up = higher Q (narrower), scroll down = lower Q (wider). Exponential steps.
     auto& ui = bands[(size_t) h];
+
+    // Shift + scroll = slope (filter type), Ctrl + scroll = shape. One notch = one step.
+    if (e.mods.isShiftDown() || e.mods.isCtrlDown())
+    {
+        endWheelGesture();
+
+        const float delta = std::abs (wheel.deltaY) >= std::abs (wheel.deltaX) ? wheel.deltaY : wheel.deltaX;
+        choiceWheelAccum += delta;
+        if (std::abs (choiceWheelAccum) < 0.25f)
+            return;
+
+        const int dir = choiceWheelAccum > 0.0f ? 1 : -1;
+        choiceWheelAccum = 0.0f;
+
+        const bool slope = e.mods.isShiftDown();
+        auto* p = slope ? ui.pType : ui.pShape;
+        const int maxIdx = slope ? (int) MiniLiveStripProcessor::NumEqTypes - 1
+                                 : MiniLiveStripProcessor::kNumShapes - 1;
+        const int cur  = (int) std::lround (plainValue (p));
+        const int next = juce::jlimit (0, maxIdx, cur + dir);
+
+        if (next != cur)
+        {
+            gesture (p, true);
+            setPlain (p, (float) next);
+            gesture (p, false);
+        }
+        return;
+    }
+
+    // Plain scroll = Q: scroll up = higher Q (narrower), scroll down = lower Q (wider). Exponential steps.
     const float step = juce::jlimit (-0.2f, 0.2f, wheel.deltaY * 0.5f);
     const float q = plainValue (ui.pQ) * std::exp (step);
 
@@ -2009,7 +2132,7 @@ void MiniLiveStripEditor::drawBar (juce::Graphics& g)
     {
         g.setFont (fkFont (9.5f));
         g.setColour (kLabelColour.withAlpha (0.7f));
-        g.drawText ("EQ point: click = knobs   drag = freq / gain   scroll = Q   double-click = reset   right-click = menu",
+        g.drawText ("EQ point: drag = freq/gain   ctrl+drag = Q/gain   scroll = Q   shift+scroll = slope   ctrl+scroll = shape",
                     hx, undoBtn.getY(), hw, undoBtn.getHeight(), juce::Justification::centredLeft);
     }
 }
@@ -2043,7 +2166,7 @@ void MiniLiveStripEditor::drawSub (juce::Graphics& g)
 
     g.setFont (fkFont (9.0f));
     g.setColour (kLabelColour.withAlpha (0.8f));
-    g.drawText ("Growth: a peak must keep growing   Reset feedback: clears all notches",
+    g.drawText ("Scan: places notches   Growth: a peak must keep growing   Reset feedback: clears all notches",
                 subArea.getX() + 12, subArea.getBottom() - 22, subArea.getWidth() - 24, 14,
                 juce::Justification::centredLeft);
 }
@@ -2056,7 +2179,7 @@ void MiniLiveStripEditor::drawDisplay (juce::Graphics& g)
 
     const auto G = makeGeom();
     const auto area = G.area;
-    g.setColour (juce::Colour (0xff0e1a2c));
+    g.setColour (juce::Colour (0xff25272a));
     g.fillRoundedRectangle (area, 6.0f);
 
     constexpr float fMin = kFMin;
@@ -2109,14 +2232,10 @@ void MiniLiveStripEditor::drawDisplay (juce::Graphics& g)
         return proc.spectrumDisplay[(size_t) juce::jlimit (0, nb, i)].load (std::memory_order_relaxed);
     };
 
-    const float threshold = proc.getThreshold();
-    const float detectMaxHz = juce::jmin (12000.0f, 0.45f * sr);
 
     const int columns = juce::jmax (1, (int) (area.getWidth() / 2.0f));   // 2 px per column
     if ((int) smoothed.size() != columns)
         smoothed.assign ((size_t) columns, dbBottom);
-    if ((int) thrSmoothed.size() != columns)
-        thrSmoothed.assign ((size_t) columns, MiniLiveStripProcessor::kGateDb);
 
     // Display value of one RTA column for a given spectrum source (input or output).
     auto columnDb = [&] (int c, auto&& specAt)
@@ -2156,9 +2275,8 @@ void MiniLiveStripEditor::drawDisplay (juce::Graphics& g)
     lastRtaMs = nowMs;
     const float fallCoef = 1.0f - std::exp (-dtMs / juce::jmax (1.0f, (float) rtaTime.getValue()));
 
-    juce::Path line, thrLine;
+    juce::Path line;
     float firstX = 0.0f, lastX = 0.0f;
-    bool thrStarted = false;
 
     for (int c = 0; c < columns; ++c)
     {
@@ -2177,30 +2295,6 @@ void MiniLiveStripEditor::drawDisplay (juce::Graphics& g)
         else        { line.lineTo (x, y); }
         lastX = x;
 
-        // Detection threshold: the level a peak must reach at this frequency to be
-        // detected = average of the surrounding bins (3..12 bins away) + threshold,
-        // and never below the gate level. Same rule the detector uses.
-        const float cf = std::sqrt (f0 * f1);
-        if (cf >= 100.0f && cf <= detectMaxHz)
-        {
-            const int k = juce::jlimit (4, nb - 1, (int) std::lround (cf / binHz));
-            float sum = 0.0f;
-            int count = 0;
-            for (int d = 3; d <= 12; ++d)
-            {
-                if (k - d >= 1)  { sum += spec (k - d); ++count; }
-                if (k + d <= nb) { sum += spec (k + d); ++count; }
-            }
-
-            const float target = juce::jmax (MiniLiveStripProcessor::kGateDb,
-                                             sum / (float) juce::jmax (1, count) + threshold);
-            auto& ts = thrSmoothed[(size_t) c];
-            ts += (target - ts) * 0.15f;
-
-            const float ty = yForDb (ts);
-            if (! thrStarted) { thrLine.startNewSubPath (x, ty); thrStarted = true; }
-            else              { thrLine.lineTo (x, ty); }
-        }
     }
 
     juce::Path fill (line);
@@ -2286,16 +2380,6 @@ void MiniLiveStripEditor::drawDisplay (juce::Graphics& g)
                     juce::Justification::centred);
     }
 
-    // ---- Detection threshold line (yellow, dashed)
-    if (thrStarted)
-    {
-        const float dashes[] = { 5.0f, 3.0f };
-        juce::Path dashed;
-        juce::PathStrokeType (1.3f).createDashedStroke (dashed, thrLine, dashes, 2);
-        g.setColour (kThresholdColour);
-        g.fillPath (dashed);
-    }
-
     // ---- Filter response overlays (own scale: +/- respRange dB around the middle line)
     g.setColour (juce::Colour (0x33ffffff));
     g.drawHorizontalLine ((int) midY, area.getX(), area.getRight());
@@ -2366,7 +2450,7 @@ void MiniLiveStripEditor::drawDisplay (juce::Graphics& g)
             return total;
         });
 
-        g.setColour (kEqColour.withAlpha (plainValue (pEqOn) > 0.5f ? 1.0f : 0.25f));
+        g.setColour (juce::Colours::white.withAlpha (plainValue (pEqOn) > 0.5f ? 1.0f : 0.25f));
         g.strokePath (path, juce::PathStrokeType (1.8f));
     }
 
@@ -2442,15 +2526,11 @@ void MiniLiveStripEditor::drawDisplay (juce::Graphics& g)
     const int ly = (int) area.getBottom() - 15;
     int lx = (int) area.getX() + 8;
 
-    g.setColour (kThresholdColour);
-    g.drawText ("- - Threshold +" + juce::String (threshold, 1) + " dB", lx, ly, 150, 12, juce::Justification::left);
-    lx += 155;
-
     g.setColour (kNotchColour);
     g.drawText ("Notch / Q " + juce::String (qNow, 1), lx, ly, 110, 12, juce::Justification::left);
     lx += 115;
 
-    g.setColour (kEqColour);
+    g.setColour (juce::Colours::white);
     g.drawText ("EQ curve", lx, ly, 70, 12, juce::Justification::left);
     lx += 75;
 

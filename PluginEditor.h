@@ -77,7 +77,20 @@ public:
     void setValue (float reductionDb);  // positive dB of reduction
     void paint (juce::Graphics&) override;
 
+    // Optional fader: the marker line can be dragged (limiter / compressor threshold).
+    bool markerDraggable = false;
+    std::function<void (float)> onMarkerDrag;          // depth in dB (0..range) while dragging
+    std::function<void (bool)>  onMarkerDragState;     // true = drag started, false = ended
+    void mouseMove (const juce::MouseEvent&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+
 private:
+    juce::Rectangle<float> barRect() const;
+    float yForDepth (float db) const;
+    bool draggingMarker = false;
+
     float range = 30.0f;
     float step = 10.0f;
     float fallPerFrame = 1.5f;
@@ -274,51 +287,6 @@ private:
     bool dragged = false;
 };
 
-// Sub-display opened by the SET button next to the SOLO headphone: solo width and slope.
-class SoloSubPanel : public juce::Component
-{
-public:
-    juce::Slider widthKnob, slopeKnob;
-
-    SoloSubPanel()
-    {
-        widthKnob.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-        widthKnob.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 60, 14);
-        widthKnob.setRange (0.1, 4.0, 0.01);
-        widthKnob.setSkewFactor (0.5);
-        widthKnob.setTextValueSuffix (" oct");
-
-        slopeKnob.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-        slopeKnob.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 60, 14);
-        slopeKnob.setRange (1.0, 4.0, 1.0);
-        slopeKnob.textFromValueFunction = [] (double v) { return juce::String (12 * (int) std::round (v)) + " dB/oct"; };
-
-        addAndMakeVisible (widthKnob);
-        addAndMakeVisible (slopeKnob);
-    }
-
-    void paint (juce::Graphics& g) override
-    {
-        g.fillAll (juce::Colour (0xff0e1a2c).withAlpha (0.95f));
-        g.setColour (juce::Colour (0xff2a3c55));
-        g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (0.5f), 5.0f, 1.0f);
-
-        auto top = getLocalBounds().reduced (6).removeFromTop (14);
-        g.setColour (juce::Colour (0xff8a96a8));
-        g.setFont (juce::FontOptions (11.0f));
-        g.drawText ("WIDTH", top.removeFromLeft (top.getWidth() / 2), juce::Justification::centred);
-        g.drawText ("SLOPE", top, juce::Justification::centred);
-    }
-
-    void resized() override
-    {
-        auto r = getLocalBounds().reduced (6);
-        r.removeFromTop (14);
-        widthKnob.setBounds (r.removeFromLeft (r.getWidth() / 2));
-        slopeKnob.setBounds (r);
-    }
-};
-
 class MiniLiveStripEditor : public juce::AudioProcessorEditor,
                              private juce::Timer
 {
@@ -432,11 +400,8 @@ private:
     juce::Slider rtaTime;                                  // RTA fall time (bottom right of the analyser)
     juce::Slider rtaDepth;                                 // RTA depth in dB (next to RTA time)
     std::atomic<float>* rtaDepthVal = nullptr;
-    LedButton growthBtn, resetBtn;
+    LedButton scanBtn, growthBtn, resetBtn;
     SoloButton bandSoloBtn;                                 // SOLO for the selected EQ band (inside the popup)
-    LedButton soloSubBtn;                                  // SET: opens the solo sub-display
-    SoloSubPanel soloSub;                                  // solo width and slope
-    std::vector<std::unique_ptr<juce::SliderParameterAttachment>> soloSubAtt;
     LedButton fbBtn, undoBtn, redoBtn;
     LedButton subCloseBtn;                                 // closes the feedback panel
 
@@ -461,7 +426,6 @@ private:
     std::array<BandUi, kBands> bands;
 
     std::vector<float> smoothed;      // RTA: smoothed dB value per display column
-    std::vector<float> thrSmoothed;   // detection threshold line: smoothed dB per column
     std::vector<float> smoothedPost;  // output RTA: smoothed dB value per display column
 
     int   qPreviewFrames = 0;         // shows a Q preview curve for a moment after Q/Depth changes
@@ -477,6 +441,11 @@ private:
     int  dragBand  = -1;              // EQ point being dragged
     int  shiftSoloBand = -1;          // band soloed by Shift + hold on its point
     bool dragGain  = false;           // dragged band also moves gain
+    bool  dragCtrl = false;           // Ctrl + drag on a point: horizontal = Q, vertical = gain (freq stays)
+    float ctrlQ0 = 1.0f, ctrlGain0 = 0.0f;   // values when the Ctrl drag started
+    float choiceWheelAccum = 0.0f;    // Shift / Ctrl wheel: fractional scroll amount
+    juce::RangedAudioParameter* grThrParam = nullptr;   // threshold moved by the GR meter fader
+    bool grThrComp = false;
     int  wheelBand = -1;              // band whose Q is being changed with the wheel (one undo step)
     juce::uint32 lastWheelMs = 0;
 

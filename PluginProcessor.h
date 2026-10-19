@@ -385,9 +385,8 @@ private:
     std::array<std::array<std::array<std::array<double, 2>, 4>, kNumEqBands>, 2> soloZ {};   // [channel][band][stage] = {z1, z2}
     std::atomic<float>* pSoloLevel = nullptr;     // solo listening level in dB (drag vertically on the SOLO button)
     juce::SmoothedValue<float> soloGain;          // linear gain of pSoloLevel, smoothed
-    std::atomic<float>* pSoloWidth = nullptr;     // solo listen width in octaves (band-pass types)
-    std::atomic<float>* pSoloSlope = nullptr;     // solo edge slope: 1..4 stages = 12..48 dB/oct
-    int soloStages = 2;
+    // Solo width and slope follow the band's Q (see processBlock): stages per band, 1..4 = 12..48 dB/oct
+    std::array<int, kNumEqBands> soloStagesB {};
     std::array<bool, kNumEqBands> eqOn {};
 
     juce::dsp::FFT fft { kFftOrder };
