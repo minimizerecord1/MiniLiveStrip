@@ -216,8 +216,8 @@ private:
 };
 
 //==============================================================================
-// 31-band graphic equalizer (ISO 1/3 octave, 20 Hz .. 20 kHz, +/-12 dB). It lives over the RTA.
-// Module not selected: the panel stays visible at 30 % opacity and lets the mouse through.
+// 31-band graphic equalizer (ISO 1/3 octave, 20 Hz .. 20 kHz, +/-30 dB). It lives over the RTA.
+// Module not selected: the panel stays visible at 15 % opacity and lets the mouse through.
 // Module selected (GEQ button clicked): full opacity, drag the faders.
 //   drag a fader = gain (Ctrl = fine), Shift + drag across = sweep several faders,
 //   wheel = +/-0.5 dB, double-click = 0 dB, right-click = reset all.
@@ -225,8 +225,8 @@ class GeqPanel : public juce::Component
 {
 public:
     static constexpr int   kN         = MiniLiveStripProcessor::kGeqBands;
-    static constexpr float kIdleAlpha = 0.3f;     // opacity while the GEQ button is not selected
-    static constexpr float kRange     = 12.0f;    // +/- dB
+    static constexpr float kIdleAlpha = 0.15f;    // opacity while the GEQ button is not selected
+    static constexpr float kRange     = 30.0f;    // +/- dB
 
     explicit GeqPanel (MiniLiveStripProcessor&);
 
@@ -375,6 +375,7 @@ private:
     static constexpr int kModBtn   = 54;       // size of the square module buttons
     static constexpr int kChevGap  = 8;        // gap between the module buttons (arrow of the signal flow)
     static constexpr int kMeterW   = 16;       // thin meters on the right (output meter)
+    static constexpr int   kOutW   = 2 * kMeterW + 2;   // output block: mono = one bar, stereo = two bars
     static constexpr int kRedW     = ReductionMeter::kGutter + kMeterW;   // GR / gate meters incl. dB scale
     static constexpr int kGainBlkW = 60;       // GAIN IN knob block, left of the module buttons
     static constexpr int kMeterGap = 8;
@@ -482,6 +483,8 @@ private:
     ReductionMeter grMeter;                                // limiter / compressor gain reduction
     ReductionMeter gateMeter;                              // gate attenuation
     LevelMeter outMeter;                                   // output level
+    LevelMeter outMeterR;                                  // right channel (stereo only)
+    bool outStereoShown = false;
 
     juce::String grCaption2, gateCaption2;                 // threshold read-outs under the meters
 

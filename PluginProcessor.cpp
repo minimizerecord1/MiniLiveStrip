@@ -435,7 +435,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout MiniLiveStripProcessor::crea
         layout.add (std::make_unique<AudioParameterFloat> (
             ParameterID { "geq" + String (b + 1), 1 },
             "GEQ " + String (b + 1) + " Gain (dB)",
-            NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f));
+            NormalisableRange<float> (-30.0f, 30.0f, 0.1f), 0.0f));
 
     return layout;
 }
@@ -767,6 +767,9 @@ void MiniLiveStripProcessor::prepareToPlay (double sampleRate, int)
     meterHold = 0.0f;
     meterDecay = std::exp (-1.0 / (0.3 * sampleRate));       // ~300 ms fall for the meter
     outLevelDisplay.store (0.0f);
+    outLevelDisplayR.store (0.0f);
+    meterHoldR = 0.0f;
+    outIsStereo.store (false);
 
     for (int b = 0; b < kNumEqBands; ++b)
     {
@@ -918,7 +921,7 @@ void MiniLiveStripProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     float* left  = buffer.getWritePointer (0);
     float* right = numChannels > 1 ? buffer.getWritePointer (1) : nullptr;
 
-    float blockPeak = 0.0f;
+    float blockPeakL = 0.0f, blockPeakR = 0.0f;
     float limInPeak = 0.0f, limGrMin = 1.0f;
     float gateInPeak = 0.0f, gateGainMin = 1.0f;
 
@@ -1197,7 +1200,8 @@ void MiniLiveStripProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             right[i] = oR;
 
 
-        blockPeak = juce::jmax (blockPeak, std::abs (oL), right != nullptr ? std::abs (oR) : 0.0f);
+        blockPeakL = juce::jmax (blockPeakL, std::abs (oL));
+        blockPeakR = juce::jmax (blockPeakR, right != nullptr ? std::abs (oR) : 0.0f);
 
         // Feed the output analyser (mono mix of the final output).
         outputRing[(size_t) outWritePos] = right != nullptr ? 0.5f * (left[i] + right[i]) : left[i];
@@ -1217,8 +1221,12 @@ void MiniLiveStripProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     keepMax (gateGrDisplay, -juce::Decibels::gainToDecibels (gateGainMin,  -100.0f));
 
     // Output level for the GUI meter (peak with a slow decay).
-    meterHold = juce::jmax (blockPeak, meterHold * (float) std::pow (meterDecay, (double) numSamples));
-    outLevelDisplay.store (meterHold, std::memory_order_relaxed);
+    const float meterFall = (float) std::pow (meterDecay, (double) numSamples);
+    meterHold  = juce::jmax (blockPeakL, meterHold  * meterFall);
+    meterHoldR = juce::jmax (blockPeakR, meterHoldR * meterFall);
+    outLevelDisplay.store  (meterHold,  std::memory_order_relaxed);
+    outLevelDisplayR.store (meterHoldR, std::memory_order_relaxed);
+    outIsStereo.store (right != nullptr, std::memory_order_relaxed);
 }
 
 //==============================================================================

@@ -110,7 +110,7 @@ public:
     using ModuleOrder = std::array<int, NumModules>;
     static constexpr int kNumOrders = 120;                 // 5! permutations of the modules
 
-    // 31-band graphic EQ (ISO 1/3 octave centres, 20 Hz .. 20 kHz), +/-12 dB per band.
+    // 31-band graphic EQ (ISO 1/3 octave centres, 20 Hz .. 20 kHz), +/-30 dB per band.
     static constexpr int    kGeqBands = 31;
     static constexpr double kGeqQ     = 4.32;              // ~ 1/3 octave bandwidth
     static constexpr std::array<float, kGeqBands> kGeqFreqs {
@@ -260,6 +260,9 @@ public:
 
     // Output peak level (linear, after the limiter, slow decay) for the GUI meter.
     std::atomic<float> outLevelDisplay { 0.0f };
+    std::atomic<float> outLevelDisplayR { 0.0f };   // right channel (stereo only)
+    std::atomic<bool>  outIsStereo { false };       // host runs the plugin in stereo
+
 
     // Limiter / gate meters for the sub-displays (dB, written once per block).
     std::atomic<float> limInDisplay   { -100.0f };   // peak level in front of the limiter (before the threshold gain)
@@ -386,6 +389,7 @@ private:
     float  gateEnvDecay = 0.0f;
     int    gateHoldCount = 0;
     float  meterHold = 0.0f;                  // output peak with decay (linear)
+    float  meterHoldR = 0.0f;                 // right channel output peak with decay
     double meterDecay = 0.0;                  // per-sample decay factor of meterHold
 
     std::array<std::atomic<float>*, kNumEqBands> pEqFreq  {};

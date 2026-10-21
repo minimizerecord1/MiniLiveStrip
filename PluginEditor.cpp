@@ -1104,7 +1104,7 @@ void GeqPanel::paint (juce::Graphics& g)
 
     // dB scale
     g.setFont (fkFont (8.0f));
-    for (float db : { 12.0f, 6.0f, 0.0f, -6.0f, -12.0f })
+    for (float db : { 30.0f, 15.0f, 0.0f, -15.0f, -30.0f })
     {
         const float y = yForDb (db);
         g.setColour (juce::Colours::white.withAlpha (db == 0.0f ? 0.35f : 0.12f));
@@ -1429,6 +1429,7 @@ MiniLiveStripEditor::MiniLiveStripEditor (MiniLiveStripProcessor& p)
     addAndMakeVisible (grMeter);
     addAndMakeVisible (gateMeter);
     addAndMakeVisible (outMeter);
+    addAndMakeVisible (outMeterR);
 
     addChildComponent (popup);
 
@@ -1525,6 +1526,12 @@ void MiniLiveStripEditor::timerCallback()
     grMeter.setValue   (proc.limGrDisplay.exchange  (0.0f, std::memory_order_relaxed));
     gateMeter.setValue (proc.gateGrDisplay.exchange (0.0f, std::memory_order_relaxed));
     outMeter.setLevel  (proc.outLevelDisplay.load (std::memory_order_relaxed));
+    outMeterR.setLevel (proc.outLevelDisplayR.load (std::memory_order_relaxed));
+    if (proc.outIsStereo.load (std::memory_order_relaxed) != outStereoShown)
+    {
+        resized();                                 // mono <-> stereo changed: re-split the output block
+        repaint();
+    }
 
     // Module lamps follow their on/off parameters.
     auto paramOn = [this] (const char* id) { return proc.apvts.getRawParameterValue (id)->load() > 0.5f; };
@@ -1554,7 +1561,7 @@ void MiniLiveStripEditor::resized()
     auto r = getLocalBounds().reduced (10);
 
     // Thin meters at the right edge, from the top to the bottom of the GUI.
-    meterArea = r.removeFromRight (2 * kRedW + kMeterW + 2 * kMeterGap);
+    meterArea = r.removeFromRight (2 * kRedW + kOutW + 2 * kMeterGap);
     r.removeFromRight (8);
     displayArea = r;                                   // the RTA gets everything that is left
 
@@ -1562,7 +1569,18 @@ void MiniLiveStripEditor::resized()
     bars.removeFromBottom (26);                        // captions (two lines)
     grMeter.setBounds   (meterArea.getX(),                                  bars.getY(), kRedW,   bars.getHeight());
     gateMeter.setBounds (meterArea.getX() + kRedW + kMeterGap,              bars.getY(), kRedW,   bars.getHeight());
-    outMeter.setBounds  (meterArea.getX() + 2 * (kRedW + kMeterGap),        bars.getY(), kMeterW, bars.getHeight());
+    outStereoShown = proc.outIsStereo.load (std::memory_order_relaxed);
+    const int ox = meterArea.getX() + 2 * (kRedW + kMeterGap);
+    if (outStereoShown)     // stereo: the output block is split into left and right bars
+    {
+        outMeter.setBounds  (ox,                       bars.getY(), kMeterW, bars.getHeight());
+        outMeterR.setBounds (ox + kMeterW + 2,         bars.getY(), kMeterW, bars.getHeight());
+    }
+    else
+    {
+        outMeter.setBounds  (ox, bars.getY(), kMeterW, bars.getHeight());
+    }
+    outMeterR.setVisible (outStereoShown);
 
     // Undo / redo: top left inside the analyser.
     undoBtn.setBounds (displayArea.getX() + 8, displayArea.getY() + 8, 56, 20);
@@ -2465,11 +2483,21 @@ void MiniLiveStripEditor::paint (juce::Graphics& g)
     // Captions of the thin meters
     g.setColour (kLabelColour);
     g.setFont (fkFont (8.5f, true));
-    const char* names[3] = { "GR", "GATE", "OUT" };
-    juce::Component* ms[3] = { &grMeter, &gateMeter, &outMeter };
-    for (int i = 0; i < 3; ++i)
-        g.drawText (names[i], ms[i]->getX() - 6, ms[i]->getBottom() + 1, ms[i]->getWidth() + 12, 12,
-                    juce::Justification::centred);
+    auto caption = [&] (const juce::Component& m, const juce::String& t)
+    {
+        g.drawText (t, m.getX() - 6, m.getBottom() + 1, m.getWidth() + 12, 12, juce::Justification::centred);
+    };
+    caption (grMeter, "GR");
+    caption (gateMeter, "GATE");
+    if (outStereoShown)
+    {
+        caption (outMeter, "L");
+        caption (outMeterR, "R");
+    }
+    else
+    {
+        caption (outMeter, "OUT");
+    }
 
     // Threshold read-outs under the GR and GATE meters
     g.setFont (fkFont (8.0f));
@@ -2822,8 +2850,11 @@ void MiniLiveStripEditor::drawDisplay (juce::Graphics& g)
             return total;
         });
 
-        g.setColour (juce::Colours::white.withAlpha (plainValue (pEqOn) > 0.5f ? 1.0f : 0.25f));
-        g.strokePath (path, juce::PathStrokeType (1.8f));
+        const bool eqLive = plainValue (pEqOn) > 0.5f;
+        g.setColour (juce::Colours::white.withAlpha (eqLive ? 0.25f : 0.07f));   // soft glow under the line
+        g.strokePath (path, juce::PathStrokeType (6.0f));
+        g.setColour (juce::Colours::white.withAlpha (eqLive ? 1.0f : 0.35f));
+        g.strokePath (path, juce::PathStrokeType (2.4f));
     }
 
     // ---- EQ points (drag = freq/gain, scroll = Q)
