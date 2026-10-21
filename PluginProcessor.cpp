@@ -43,6 +43,9 @@ MiniLiveStripProcessor::MiniLiveStripProcessor()
     pCompMakeup  = apvts.getRawParameterValue ("compMakeup");
     pChainOrder  = apvts.getRawParameterValue ("chainOrder");
     pEqGlobalOn  = apvts.getRawParameterValue ("eqOn");
+    pGeqOn       = apvts.getRawParameterValue ("geqOn");
+    for (int b = 0; b < kGeqBands; ++b)
+        pGeqGain[(size_t) b] = apvts.getRawParameterValue ("geq" + juce::String (b + 1));
 
     for (int b = 0; b < kNumEqBands; ++b)
     {
@@ -307,7 +310,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout MiniLiveStripProcessor::crea
     // Order of the four modules (Feedback, EQ, Limiter / Comp, Gate): index of the permutation.
     // 0 = Feedback -> EQ -> Limiter -> Gate (the original fixed order).
     layout.add (std::make_unique<AudioParameterInt> (
-        ParameterID { "chainOrder", 1 }, "Chain Order", 0, 23, 0));
+        ParameterID { "chainOrder", 1 }, "Chain Order", 0, kNumOrders - 1, 0));
 
     // Limiter on/off (default on: it only does something when the output would pass 0 dBFS)
     layout.add (std::make_unique<AudioParameterBool> (
@@ -423,6 +426,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout MiniLiveStripProcessor::crea
     // Solo listening level (drag vertically on the SOLO button; not in the normal EQ path).
     layout.add (std::make_unique<AudioParameterFloat> (
         ParameterID { "soloLevel", 1 }, "Solo Level", NormalisableRange<float> (-24.0f, 12.0f, 0.1f), 0.0f));
+
+    // ---- GEQ: 31-band graphic EQ (appended last so older sessions keep loading, bands flat)
+    layout.add (std::make_unique<AudioParameterBool> (
+        ParameterID { "geqOn", 1 }, "GEQ On", true));
+
+    for (int b = 0; b < kGeqBands; ++b)
+        layout.add (std::make_unique<AudioParameterFloat> (
+            ParameterID { "geq" + String (b + 1), 1 },
+            "GEQ " + String (b + 1) + " Gain (dB)",
+            NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f));
 
     return layout;
 }
@@ -725,6 +738,16 @@ void MiniLiveStripProcessor::prepareToPlay (double sampleRate, int)
     eqGlobalMix.reset (sampleRate, 0.015);
     eqGlobalMix.setCurrentAndTargetValue (pEqGlobalOn->load() > 0.5f ? 1.0f : 0.0f);
 
+    // GEQ
+    for (auto& ch : geqFilters)
+        for (auto& f : ch)
+            f.setPassthrough();
+    geqLast.fill (-1000.0f);              // forces a coefficient update on the first block
+    geqActive.fill (false);
+    geqNum = 0;
+    geqMix.reset (sampleRate, 0.015);
+    geqMix.setCurrentAndTargetValue (pGeqOn->load() > 0.5f ? 1.0f : 0.0f);
+
     // Limiter: one-pole gain smoothing; attack / release are set per block from the parameters.
     limGain = 1.0f;
     limAttackCoef  = 1.0f - (float) std::exp (-1.0 / (0.001 * sampleRate));
@@ -794,6 +817,8 @@ void MiniLiveStripProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     fbMix.setTargetValue (fbOn ? 1.0f : 0.0f);
     eqGlobalMix.setTargetValue (pEqGlobalOn->load() > 0.5f ? 1.0f : 0.0f);
+    geqMix.setTargetValue (pGeqOn->load() > 0.5f ? 1.0f : 0.0f);
+    updateGeq();
 
     const bool  limOn    = pLimOn->load() > 0.5f;
     const bool  compMode = pLimMode->load() > 0.5f;
@@ -1110,6 +1135,28 @@ void MiniLiveStripProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         gateGainMin = juce::jmin (gateGainMin, gateGain);
     };
 
+    // ---- Module 5: 31-band graphic EQ. Only the bands that are not flat run; the GEQ switch
+    //      crossfades between dry and equalised signal.
+    auto stageGeq = [&] (float& L, float& R)
+    {
+        const float gm = geqMix.getNextValue();     // runs every sample so the smoother stays in step
+        if (geqNum == 0)
+            return;
+
+        float wl = L;
+        float wr = R;
+        for (int k = 0; k < geqNum; ++k)
+        {
+            const auto bi = (size_t) geqIdx[(size_t) k];
+            wl = geqFilters[0][bi].process (wl);
+            if (right != nullptr)
+                wr = geqFilters[1][bi].process (wr);
+        }
+
+        if (gm >= 1.0f) { L = wl; R = wr; }
+        else            { L += (wl - L) * gm; R += (wr - R) * gm; }
+    };
+
     for (int i = 0; i < numSamples; ++i)
     {
         // Input gain (smoothed, no zipper noise): in front of ALL modules and of the analyser.
@@ -1128,18 +1175,19 @@ void MiniLiveStripProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             analysePost();  // output RTA (display only)
         }
 
-        // Processing chain: the four modules run in the order chosen in the editor.
+        // Processing chain: the five modules run in the order chosen in the editor.
         // Every module runs exactly once per sample, so all smoothers keep running.
         float oL = inL;
         float oR = inR;
 
-        for (int slot = 0; slot < 4; ++slot)
+        for (int slot = 0; slot < NumModules; ++slot)
         {
             switch (order[(size_t) slot])
             {
                 case ModFeedback: stageFeedback (oL, oR); break;
                 case ModEq:       stageEq       (oL, oR); break;
                 case ModLimiter:  stageLimiter  (oL, oR); break;
+                case ModGeq:      stageGeq      (oL, oR); break;
                 default:          stageGate     (oL, oR); break;
             }
         }
@@ -1225,6 +1273,38 @@ void MiniLiveStripProcessor::updateEq()
             }
         }
     }
+}
+
+//==============================================================================
+// GEQ: refresh the coefficients of the bands that changed and rebuild the list of non-flat bands.
+void MiniLiveStripProcessor::updateGeq()
+{
+    int n = 0;
+
+    for (int b = 0; b < kGeqBands; ++b)
+    {
+        const auto i = (size_t) b;
+        const float g = pGeqGain[i]->load();
+
+        if (g != geqLast[i])
+        {
+            geqLast[i] = g;
+            const auto c = makePeaking (fs, (double) kGeqFreqs[i], (double) g, kGeqQ);
+            for (auto& ch : geqFilters)
+                ch[i].setCoeffs (c);
+        }
+
+        const bool act = std::abs (g) > 0.05f;
+        if (act && ! geqActive[i])
+            for (auto& ch : geqFilters)
+                ch[i].clearState();               // coming from flat: start from clean state
+        geqActive[i] = act;
+
+        if (act)
+            geqIdx[(size_t) n++] = b;
+    }
+
+    geqNum = n;
 }
 
 //==============================================================================

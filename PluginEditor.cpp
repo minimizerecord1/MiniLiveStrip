@@ -7,6 +7,7 @@ namespace
     const juce::Colour kEqColour        (0xff7cf29a);   // green: EQ curve
     const juce::Colour kAccent          (0xffffb020);
     const juce::Colour kPostColour      (0xffe0a2ff);   // violet: output RTA (post)
+    const juce::Colour kGeqColour       (0xfff06292);   // pink: graphic EQ
 
     const juce::Colour kBgColour    (0xff0e0f11);
     const juce::Colour kPanelColour (0xff1c1f23);
@@ -504,6 +505,18 @@ void ModuleButton::paint (juce::Graphics& g)
             g.drawLine (x, y + h, x + w, y + h, 0.8f);
             break;
 
+        case IconGeq:           // five little faders of different height
+        {
+            const float ky[5] = { 0.55f, 0.25f, 0.70f, 0.40f, 0.60f };
+            for (int k = 0; k < 5; ++k)
+            {
+                const float fx = x + w * (0.10f + 0.20f * (float) k);
+                g.drawLine (fx, y, fx, y + h, 1.0f);
+                g.fillRoundedRectangle (fx - 2.5f, y + h * ky[k] - 2.0f, 5.0f, 4.0f, 1.0f);
+            }
+            break;
+        }
+
         case IconGate:          // quiet signal that is cut, then a loud one passes
         {
             const int n = 14;
@@ -790,11 +803,358 @@ void DynamicsPanel::paint (juce::Graphics& g)
 }
 
 //==============================================================================
+//==============================================================================
+// 31-band graphic EQ panel
+namespace
+{
+    juce::String geqFreqLabel (float f)
+    {
+        if (f >= 1000.0f)
+        {
+            const float v = f / 1000.0f;
+            if (std::abs (v - std::round (v)) < 0.001f)
+                return juce::String ((int) std::lround (v)) + "k";
+            auto s = juce::String (v, 2);
+            if (s.endsWithChar ('0'))
+                s = s.dropLastCharacters (1);
+            return s + "k";
+        }
+        return std::abs (f - std::round (f)) > 0.01f ? juce::String (f, 1) : juce::String ((int) std::lround (f));
+    }
+}
+
+GeqPanel::GeqPanel (MiniLiveStripProcessor& p) : proc (p)
+{
+    for (int i = 0; i < kN; ++i)
+    {
+        params[(size_t) i] = proc.apvts.getParameter ("geq" + juce::String (i + 1));
+        shown[(size_t) i]  = getGain (i);
+    }
+    pOn = proc.apvts.getRawParameterValue ("geqOn");
+    lastOn = pOn->load() > 0.5f;
+
+    onBtn.setClickingTogglesState (true);
+    onBtn.setLabel ("ON");
+    onBtn.setLabelOff ("OFF");
+    onBtn.setColourOn (kGeqColour);
+    addAndMakeVisible (onBtn);
+    onAtt = std::make_unique<juce::ButtonParameterAttachment> (*proc.apvts.getParameter ("geqOn"), onBtn, nullptr);
+
+    resetBtn.setLabel ("RESET");
+    resetBtn.setColourOn (kGeqColour);
+    resetBtn.onClick = [this] { resetAll(); };
+    addAndMakeVisible (resetBtn);
+
+    closeBtn.setLabel ("CLOSE");
+    closeBtn.setColourOn (kGeqColour);
+    closeBtn.onClick = [this] { if (onClose) onClose(); };
+    addAndMakeVisible (closeBtn);
+
+    setInterceptsMouseClicks (false, false);       // not selected: the mouse passes through to the RTA
+    setAlpha (kIdleAlpha);
+}
+
+void GeqPanel::setOpen (bool o)
+{
+    if (open == o)
+        return;
+
+    open = o;
+    setInterceptsMouseClicks (o, o);
+    if (! o)
+    {
+        endTouches();
+        hover = active = -1;
+    }
+    repaint();
+}
+
+void GeqPanel::tick()
+{
+    bool changed = false;
+    for (int i = 0; i < kN; ++i)
+    {
+        const float v = getGain (i);
+        if (v != shown[(size_t) i]) { shown[(size_t) i] = v; changed = true; }
+    }
+
+    const bool on = pOn->load() > 0.5f;
+    if (on != lastOn) { lastOn = on; changed = true; }
+
+    const float target = open ? 1.0f : kIdleAlpha;
+    if (alphaNow != target)
+    {
+        alphaNow = std::abs (alphaNow - target) < 0.02f ? target : alphaNow + (target - alphaNow) * 0.35f;
+        setAlpha (alphaNow);
+    }
+
+    if (changed)
+        repaint();
+}
+
+void GeqPanel::resized()
+{
+    auto head = getLocalBounds().reduced (8, 6).removeFromTop (24);
+    closeBtn.setBounds (head.removeFromRight (63));
+    head.removeFromRight (6);
+    resetBtn.setBounds (head.removeFromRight (63));
+    head.removeFromRight (6);
+    onBtn.setBounds (head.removeFromRight (63));
+}
+
+juce::Rectangle<float> GeqPanel::faderArea() const
+{
+    auto r = getLocalBounds().toFloat().reduced (8.0f, 6.0f);
+    r.removeFromTop (32.0f);                       // header
+    r.removeFromBottom (16.0f);                    // frequency labels
+    r.removeFromLeft (26.0f);                      // dB scale
+    return r;
+}
+
+float GeqPanel::colX (int i) const
+{
+    const auto a = faderArea();
+    return a.getX() + ((float) i + 0.5f) * a.getWidth() / (float) kN;
+}
+
+float GeqPanel::yForDb (float db) const
+{
+    const auto a = faderArea();
+    const float top = a.getY() + 5.0f, bot = a.getBottom() - 5.0f;
+    const float t = (juce::jlimit (-kRange, kRange, db) + kRange) / (2.0f * kRange);
+    return bot - t * (bot - top);
+}
+
+float GeqPanel::dbForY (float y) const
+{
+    const auto a = faderArea();
+    const float top = a.getY() + 5.0f, bot = a.getBottom() - 5.0f;
+    const float t = juce::jlimit (0.0f, 1.0f, (bot - y) / juce::jmax (1.0f, bot - top));
+    return -kRange + t * 2.0f * kRange;
+}
+
+int GeqPanel::columnAt (float x) const
+{
+    const auto a = faderArea();
+    if (x < a.getX() - 2.0f || x > a.getRight() + 2.0f)
+        return -1;
+    return juce::jlimit (0, kN - 1, (int) ((x - a.getX()) / juce::jmax (1.0f, a.getWidth()) * (float) kN));
+}
+
+float GeqPanel::getGain (int i) const
+{
+    auto* p = params[(size_t) i];
+    return p != nullptr ? p->convertFrom0to1 (p->getValue()) : 0.0f;
+}
+
+void GeqPanel::setGain (int i, float db)
+{
+    if (auto* p = params[(size_t) i])
+        p->setValueNotifyingHost (p->convertTo0to1 (p->getNormalisableRange().snapToLegalValue (db)));
+}
+
+void GeqPanel::beginTouch (int i)
+{
+    if (std::find (touched.begin(), touched.end(), i) != touched.end())
+        return;
+    touched.push_back (i);
+    if (auto* p = params[(size_t) i])
+        p->beginChangeGesture();
+}
+
+void GeqPanel::endTouches()
+{
+    for (int i : touched)
+        if (auto* p = params[(size_t) i])
+            p->endChangeGesture();
+    touched.clear();
+}
+
+void GeqPanel::resetAll()
+{
+    for (auto* p : params)
+        if (p != nullptr) p->beginChangeGesture();
+    for (auto* p : params)
+        if (p != nullptr) p->setValueNotifyingHost (p->getDefaultValue());
+    for (auto* p : params)
+        if (p != nullptr) p->endChangeGesture();
+}
+
+void GeqPanel::mouseMove (const juce::MouseEvent& e)
+{
+    const int h = columnAt (e.position.x);
+    if (h != hover) { hover = h; repaint(); }
+}
+
+void GeqPanel::mouseExit (const juce::MouseEvent&)
+{
+    hover = -1;
+    repaint();
+}
+
+void GeqPanel::mouseDown (const juce::MouseEvent& e)
+{
+    if (e.mods.isPopupMenu())
+    {
+        juce::PopupMenu menu;
+        menu.addItem (1, "Reset all faders");
+        juce::Component::SafePointer<GeqPanel> safe (this);
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this)
+                                .withTargetScreenArea (juce::Rectangle<int> (e.getScreenX(), e.getScreenY(), 1, 1)),
+                            [safe] (int r) { if (safe != nullptr && r == 1) safe->resetAll(); });
+        return;
+    }
+
+    const auto a = faderArea();
+    const int i = columnAt (e.position.x);
+    if (i < 0 || e.position.y < a.getY() - 4.0f || e.position.y > a.getBottom() + 4.0f)
+        return;
+
+    active = i;
+    beginTouch (i);
+
+    // Grab the cap where it is (no jump); a click elsewhere on the track moves it there.
+    const float capY = yForDb (getGain (i));
+    grabOffset = std::abs (e.position.y - capY) <= 8.0f ? capY - e.position.y : 0.0f;
+    setGain (i, snapDb (dbForY (e.position.y + grabOffset), e.mods.isCtrlDown()));
+    repaint();
+}
+
+void GeqPanel::mouseDrag (const juce::MouseEvent& e)
+{
+    if (active < 0)
+        return;
+
+    if (e.mods.isShiftDown())                      // sweep: every fader the mouse passes follows it
+    {
+        const int c = columnAt (e.position.x);
+        if (c >= 0)
+        {
+            active = c;
+            beginTouch (c);
+            setGain (c, snapDb (dbForY (e.position.y), false));
+        }
+    }
+    else
+    {
+        setGain (active, snapDb (dbForY (e.position.y + grabOffset), e.mods.isCtrlDown()));
+    }
+    repaint();
+}
+
+void GeqPanel::mouseUp (const juce::MouseEvent&)
+{
+    endTouches();                                  // the whole drag = one undo step
+    active = -1;
+    repaint();
+}
+
+void GeqPanel::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    const int i = columnAt (e.position.x);
+    if (i < 0)
+        return;
+
+    beginTouch (i);
+    setGain (i, 0.0f);
+    endTouches();
+    repaint();
+}
+
+void GeqPanel::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+{
+    const int i = columnAt (e.position.x);
+    if (i < 0 || wheel.deltaY == 0.0f)
+        return;
+
+    const float step = e.mods.isCtrlDown() ? 0.1f : 0.5f;
+    beginTouch (i);
+    setGain (i, getGain (i) + (wheel.deltaY > 0.0f ? step : -step));
+    endTouches();
+    repaint();
+}
+
+void GeqPanel::paint (juce::Graphics& g)
+{
+    const auto b = getLocalBounds().toFloat().reduced (0.5f);
+    g.setColour (juce::Colour (0xe0141619));
+    g.fillRoundedRectangle (b, 6.0f);
+    g.setColour (open ? kGeqColour.withAlpha (0.7f) : kLineColour);
+    g.drawRoundedRectangle (b, 6.0f, 1.0f);
+
+    // Title + read-out of the fader under the mouse
+    g.setColour (kGeqColour);
+    g.fillEllipse (14.0f, 16.0f, 7.0f, 7.0f);
+    g.setColour (juce::Colour (0xffd7dade));
+    g.setFont (fkFont (11.5f, true));
+    g.drawText ("GEQ  31 BAND", 28, 8, 130, 22, juce::Justification::centredLeft);
+
+    const int ri = active >= 0 ? active : hover;
+    if (ri >= 0)
+    {
+        g.setColour (kGeqColour);
+        g.setFont (fkFont (10.5f, true));
+        g.drawText (geqFreqLabel (MiniLiveStripProcessor::kGeqFreqs[(size_t) ri]) + "Hz   " + gainText ((double) getGain (ri)),
+                    160, 8, 200, 22, juce::Justification::centredLeft);
+    }
+
+    const bool on = pOn->load() > 0.5f;
+    const float al = on ? 1.0f : 0.45f;
+    const auto a = faderArea();
+
+    // dB scale
+    g.setFont (fkFont (8.0f));
+    for (float db : { 12.0f, 6.0f, 0.0f, -6.0f, -12.0f })
+    {
+        const float y = yForDb (db);
+        g.setColour (juce::Colours::white.withAlpha (db == 0.0f ? 0.35f : 0.12f));
+        g.fillRect (a.getX(), y - 0.5f, a.getWidth(), 1.0f);
+        g.setColour (kLabelColour);
+        g.drawText ((db > 0.0f ? juce::String ("+") : juce::String()) + juce::String ((int) db),
+                    (int) b.getX() + 4, (int) y - 6, 22, 12, juce::Justification::centredRight, false);
+    }
+
+    // Faders
+    const float colW = a.getWidth() / (float) kN;
+    const float capW = juce::jlimit (8.0f, 18.0f, colW - 5.0f), capH = 10.0f;
+    const float zeroY = yForDb (0.0f), topY = yForDb (kRange), botY = yForDb (-kRange);
+
+    for (int i = 0; i < kN; ++i)
+    {
+        const float x = colX (i);
+        const float gain = shown[(size_t) i];
+        const float y = yForDb (gain);
+        const bool hot = (i == hover || i == active);
+
+        g.setColour (juce::Colour (0xff0b0d0f));                       // slot
+        g.fillRoundedRectangle (x - 1.5f, topY, 3.0f, botY - topY, 1.5f);
+
+        g.setColour (kGeqColour.withAlpha (al * (hot ? 1.0f : 0.75f))); // fill from 0 dB to the cap
+        g.fillRect (x - 1.5f, juce::jmin (y, zeroY), 3.0f, std::abs (y - zeroY));
+
+        const auto cap = juce::Rectangle<float> (capW, capH).withCentre ({ x, y });
+        g.setColour ((hot ? juce::Colours::white : juce::Colour (0xffd7dade)).withAlpha (al));
+        g.fillRoundedRectangle (cap, 2.0f);
+        g.setColour (juce::Colour (0xff1c1f23));
+        g.fillRect (cap.getX() + 2.0f, y - 0.5f, capW - 4.0f, 1.0f);
+
+        g.setFont (fkFont (7.5f));
+        g.setColour (hot ? juce::Colours::white : kLabelColour);
+        g.drawText (geqFreqLabel (MiniLiveStripProcessor::kGeqFreqs[(size_t) i]),
+                    (int) (x - colW * 0.5f - 2.0f), (int) a.getBottom() + 3, (int) colW + 4, 11,
+                    juce::Justification::centred, false);
+    }
+}
+
+//==============================================================================
 MiniLiveStripEditor::MiniLiveStripEditor (MiniLiveStripProcessor& p)
     : juce::AudioProcessorEditor (&p), proc (p)
 {
     setLookAndFeel (&lnf);
     auto& apvts = proc.apvts;
+
+    addAndMakeVisible (geqPanel);                 // added first: sits below every other child
+    geqPanel.onClose = [this] { if (openModule == 4) toggleModule (4); };
     rtaDepthVal = apvts.getRawParameterValue ("rtaDepth");
 
     auto knob = [&] (juce::Slider& s, const juce::String& id,
@@ -1006,12 +1366,13 @@ MiniLiveStripEditor::MiniLiveStripEditor (MiniLiveStripProcessor& p)
     // ---- The four module buttons (click = panel, drag = change the processing order)
     pChainOrder = apvts.getParameter ("chainOrder");
     {
-        const char* names[4] = { "FEEDBACK", "EQ", "LIMI / COMP", "GATE" };
-        const ModuleButton::Icon icons[4] = { ModuleButton::IconFeedback, ModuleButton::IconEq,
-                                              ModuleButton::IconDynamics, ModuleButton::IconGate };
-        const juce::Colour cols[4] = { kNotchColour, kEqColour, kAccent, kGateColour };
+        const char* names[kMods] = { "FEEDBACK", "EQ", "LIMI / COMP", "GATE", "GEQ" };
+        const ModuleButton::Icon icons[kMods] = { ModuleButton::IconFeedback, ModuleButton::IconEq,
+                                                  ModuleButton::IconDynamics, ModuleButton::IconGate,
+                                                  ModuleButton::IconGeq };
+        const juce::Colour cols[kMods] = { kNotchColour, kEqColour, kAccent, kGateColour, kGeqColour };
 
-        for (int m = 0; m < 4; ++m)
+        for (int m = 0; m < kMods; ++m)
         {
             auto bt = std::make_unique<ModuleButton> (icons[m], names[m], cols[m]);
             bt->onClick     = [this, m] { toggleModule (m); };
@@ -1072,9 +1433,9 @@ MiniLiveStripEditor::MiniLiveStripEditor (MiniLiveStripProcessor& p)
     addChildComponent (popup);
 
     setWantsKeyboardFocus (true);
-    setSize (850, 500);                 // smallest size as default
+    setSize (950, 500);                 // smallest size as default
     setResizable (true, true);
-    setResizeLimits (850, 500, 2000, 1200);
+    setResizeLimits (950, 500, 2000, 1200);
     updateModuleVisibility();
     startTimerHz (30);
 }
@@ -1172,6 +1533,8 @@ void MiniLiveStripEditor::timerCallback()
     modBtn[1]->setLit (paramOn ("eqOn"));
     modBtn[2]->setLit (paramOn ("limOn"));
     modBtn[3]->setLit (paramOn ("gateOn"));
+    modBtn[4]->setLit (paramOn ("geqOn"));
+    geqPanel.tick();
 
     syncModuleOrder();                                  // undo / redo / preset load of the chain order
 
@@ -1209,7 +1572,7 @@ void MiniLiveStripEditor::resized()
     // GAIN IN knob first (signal enters here), then the four modules.
     const int barY = displayArea.getBottom() - 44 - kModBtn;
     outGain.setBounds (displayArea.getX() + 8, barY, kGainBlkW, kModBtn);
-    barArea = { outGain.getRight() + kChevGap, barY, 4 * kModBtn + 3 * kChevGap, kModBtn };
+    barArea = { outGain.getRight() + kChevGap, barY, kMods * kModBtn + (kMods - 1) * kChevGap, kModBtn };
     layoutModuleBar (false);
 
     // Bottom right strip of the analyser:  RTA DEPTH | RTA TIME
@@ -1229,7 +1592,7 @@ juce::Rectangle<int> MiniLiveStripEditor::slotRect (int slot) const
 
 void MiniLiveStripEditor::layoutModuleBar (bool animate)
 {
-    for (int s = 0; s < 4; ++s)
+    for (int s = 0; s < kMods; ++s)
     {
         const int m = moduleOrder[(size_t) s];
         auto& b = *modBtn[(size_t) m];
@@ -1251,6 +1614,14 @@ void MiniLiveStripEditor::layoutModuleBar (bool animate)
 void MiniLiveStripEditor::layoutSub()
 {
     subArea = {};
+
+    // GEQ panel: over the RTA, between the Undo / Redo row and the module buttons.
+    {
+        const int gy = displayArea.getY() + 34;
+        geqRect = { displayArea.getX() + 8, gy, displayArea.getWidth() - 16,
+                    juce::jmax (80, barArea.getY() - 14 - gy) };
+        geqPanel.setBounds (geqRect);
+    }
 
     if (openModule == 0 || openModule == 2 || openModule == 3)
     {
@@ -1313,8 +1684,9 @@ void MiniLiveStripEditor::updateModuleVisibility()
 
     limPanel.setVisible (openModule == 2);
     gatePanel.setVisible (openModule == 3);
+    geqPanel.setOpen (openModule == 4);
 
-    for (int m = 0; m < 4; ++m)
+    for (int m = 0; m < kMods; ++m)
         modBtn[(size_t) m]->setOpen (m == openModule);
 }
 
@@ -1363,29 +1735,29 @@ void MiniLiveStripEditor::moduleDragStart (int m)
 
 void MiniLiveStripEditor::moduleDragMove (int m, int wantedX)
 {
-    const int x0 = slotRect (0).getX(), x3 = slotRect (3).getX();
+    const int x0 = slotRect (0).getX(), x3 = slotRect (kMods - 1).getX();
     const int x = juce::jlimit (x0, x3, wantedX);
     modBtn[(size_t) m]->setTopLeftPosition (x, barArea.getY());
 
     const int stride = kModBtn + kChevGap;
-    const int target = juce::jlimit (0, 3, (int) std::lround ((double) (x - x0) / (double) stride));
+    const int target = juce::jlimit (0, kMods - 1, (int) std::lround ((double) (x - x0) / (double) stride));
 
-    std::array<int, 4> rest {};
+    MiniLiveStripProcessor::ModuleOrder rest {};
     int n = 0;
-    for (int s = 0; s < 4; ++s)
+    for (int s = 0; s < kMods; ++s)
         if (moduleOrder[(size_t) s] != m)
             rest[(size_t) n++] = moduleOrder[(size_t) s];
 
-    std::array<int, 4> next {};
+    MiniLiveStripProcessor::ModuleOrder next {};
     int k = 0;
-    for (int s = 0; s < 4; ++s)
+    for (int s = 0; s < kMods; ++s)
         next[(size_t) s] = (s == target) ? m : rest[(size_t) k++];
 
     if (next == dragOrder)
         return;
 
     dragOrder = next;
-    for (int s = 0; s < 4; ++s)
+    for (int s = 0; s < kMods; ++s)
     {
         const int mod = dragOrder[(size_t) s];
         modBtn[(size_t) mod]->setPosition (s + 1);
@@ -1398,7 +1770,7 @@ void MiniLiveStripEditor::moduleDragMove (int m, int wantedX)
 void MiniLiveStripEditor::moduleDragEnd (int m)
 {
     int slot = 0;
-    for (int s = 0; s < 4; ++s)
+    for (int s = 0; s < kMods; ++s)
         if (dragOrder[(size_t) s] == m)
             slot = s;
 
@@ -1425,7 +1797,7 @@ int MiniLiveStripEditor::visibleBands() const
 
 bool MiniLiveStripEditor::overlayHit (juce::Point<int> p) const
 {
-    return openModule == 0 && subArea.contains (p);
+    return (openModule == 0 && subArea.contains (p)) || (openModule == 4 && geqRect.contains (p));
 }
 
 void MiniLiveStripEditor::selectBand (int band)
@@ -2114,7 +2486,7 @@ void MiniLiveStripEditor::drawBar (juce::Graphics& g)
                 juce::Justification::centred);
 
     g.setColour (kLabelColour.withAlpha (0.75f));
-    for (int s = -1; s < 3; ++s)        // s = -1: arrow from GAIN IN into the first module
+    for (int s = -1; s < kMods - 1; ++s)        // s = -1: arrow from GAIN IN into the first module
     {
         const float cx = s < 0 ? (float) barArea.getX() - 0.5f * (float) kChevGap
                                : (float) slotRect (s).getRight() + 0.5f * (float) kChevGap;

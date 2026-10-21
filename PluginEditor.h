@@ -187,7 +187,7 @@ private:
 class ModuleButton : public juce::Component
 {
 public:
-    enum Icon { IconFeedback, IconEq, IconDynamics, IconGate };
+    enum Icon { IconFeedback, IconEq, IconDynamics, IconGate, IconGeq };
 
     ModuleButton (Icon, const juce::String& text, juce::Colour accent);
 
@@ -213,6 +213,67 @@ private:
     bool lit = false, open = false, over = false, dragging = false;
     int  slotNumber = 1;
     int  grabX = 0;
+};
+
+//==============================================================================
+// 31-band graphic equalizer (ISO 1/3 octave, 20 Hz .. 20 kHz, +/-12 dB). It lives over the RTA.
+// Module not selected: the panel stays visible at 30 % opacity and lets the mouse through.
+// Module selected (GEQ button clicked): full opacity, drag the faders.
+//   drag a fader = gain (Ctrl = fine), Shift + drag across = sweep several faders,
+//   wheel = +/-0.5 dB, double-click = 0 dB, right-click = reset all.
+class GeqPanel : public juce::Component
+{
+public:
+    static constexpr int   kN         = MiniLiveStripProcessor::kGeqBands;
+    static constexpr float kIdleAlpha = 0.3f;     // opacity while the GEQ button is not selected
+    static constexpr float kRange     = 12.0f;    // +/- dB
+
+    explicit GeqPanel (MiniLiveStripProcessor&);
+
+    void setOpen (bool);
+    bool isOpen() const { return open; }
+    void tick();                                  // 30 Hz from the editor: refresh values + fade
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void mouseMove        (const juce::MouseEvent&) override;
+    void mouseExit        (const juce::MouseEvent&) override;
+    void mouseDown        (const juce::MouseEvent&) override;
+    void mouseDrag        (const juce::MouseEvent&) override;
+    void mouseUp          (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
+    void mouseWheelMove   (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+
+    std::function<void()> onClose;
+
+private:
+    juce::Rectangle<float> faderArea() const;
+    float colX (int i) const;
+    float yForDb (float db) const;
+    float dbForY (float y) const;
+    int   columnAt (float x) const;
+    float getGain (int i) const;
+    void  setGain (int i, float db);
+    void  beginTouch (int i);
+    void  endTouches();
+    void  resetAll();
+    static float snapDb (float v, bool fine) { return (! fine && std::abs (v) < 0.4f) ? 0.0f : v; }
+
+    MiniLiveStripProcessor& proc;
+    std::array<juce::RangedAudioParameter*, kN> params {};
+    std::array<float, kN> shown {};
+    std::atomic<float>* pOn = nullptr;
+    bool lastOn = true;
+
+    LedButton onBtn, resetBtn, closeBtn;
+    bool  open = false;
+    float alphaNow = kIdleAlpha;
+    int   hover = -1, active = -1;
+    float grabOffset = 0.0f;
+    std::vector<int> touched;                     // faders with an open gesture (one undo step)
+
+    // Attachments last, so they are destroyed before the controls they refer to.
+    std::unique_ptr<juce::ButtonParameterAttachment> onAtt;
 };
 
 //==============================================================================
@@ -310,8 +371,9 @@ public:
 
 private:
     static constexpr int kBands    = MiniLiveStripProcessor::kNumEqBands;
-    static constexpr int kModBtn   = 60;       // size of the square module buttons
-    static constexpr int kChevGap  = 10;       // gap between the module buttons (arrow of the signal flow)
+    static constexpr int kMods     = MiniLiveStripProcessor::NumModules;   // 5 modules in the chain
+    static constexpr int kModBtn   = 54;       // size of the square module buttons
+    static constexpr int kChevGap  = 8;        // gap between the module buttons (arrow of the signal flow)
     static constexpr int kMeterW   = 16;       // thin meters on the right (output meter)
     static constexpr int kRedW     = ReductionMeter::kGutter + kMeterW;   // GR / gate meters incl. dB scale
     static constexpr int kGainBlkW = 60;       // GAIN IN knob block, left of the module buttons
@@ -387,7 +449,7 @@ private:
     MiniLiveStripProcessor& proc;
     MiniLiveStripLookAndFeel lnf;      // declared first: destroyed last
 
-    juce::Rectangle<int> displayArea, barArea, subArea, meterArea, popupRect;
+    juce::Rectangle<int> displayArea, barArea, subArea, meterArea, popupRect, geqRect;
     juce::RangedAudioParameter* pEqVisible = nullptr;
     juce::RangedAudioParameter* pEqOn = nullptr;       // EQ module on / off
     int selectedBand = -1;
@@ -406,15 +468,16 @@ private:
     LedButton subCloseBtn;                                 // closes the feedback panel
 
     // The four module buttons, indexed by module id (0 Feedback, 1 EQ, 2 Limi / Comp, 3 Gate).
-    std::array<std::unique_ptr<ModuleButton>, 4> modBtn;
-    std::array<int, 4> moduleOrder { 0, 1, 2, 3 };         // slot -> module (slot 0 processes first)
-    std::array<int, 4> dragOrder   { 0, 1, 2, 3 };         // tentative order while a button is dragged
+    std::array<std::unique_ptr<ModuleButton>, kMods> modBtn;
+    MiniLiveStripProcessor::ModuleOrder moduleOrder { 0, 1, 2, 3, 4 };         // slot -> module (slot 0 processes first)
+    MiniLiveStripProcessor::ModuleOrder dragOrder   { 0, 1, 2, 3, 4 };         // tentative order while a button is dragged
     int  dragModule = -1;
     int  openModule = -1;                                  // module whose panel is open, -1 = none (EQ never opens one)
     juce::RangedAudioParameter* pChainOrder = nullptr;
     juce::ComponentAnimator animator;
     DynamicsPanel limPanel  { proc, DynamicsPanel::Limiter };
     DynamicsPanel gatePanel { proc, DynamicsPanel::Gate };
+    GeqPanel geqPanel { proc };                            // 31-band graphic EQ (module 4)
 
     ReductionMeter grMeter;                                // limiter / compressor gain reduction
     ReductionMeter gateMeter;                              // gate attenuation

@@ -40,9 +40,10 @@
 // Gate (very last in the chain, after the limiter): stereo-linked downward gate with
 // Threshold / Depth / Knee / Attack / Hold / Release and an on/off switch.
 //
-// Processing chain: the four modules (Feedback, EQ + Gain Out, Limiter / Compressor, Gate) run in
+// Processing chain: the five modules (Feedback, EQ + Gain Out, Limiter / Compressor, Gate, GEQ) run in
 // an order the user chooses by dragging the big module buttons in the editor. The order is stored
-// in the "chainOrder" parameter (0..23 = index of the permutation of the 4 modules).
+// in the "chainOrder" parameter (0..119 = index of the permutation of the 5 modules; 0..23 are the
+// old 4-module orders with the GEQ last).
 //
 // EQ: up to kNumEqBands (10) bands. The editor shows kMinEqBands (4) at first and has an
 // "add band" cell ("eqVisible" parameter). Bands that are not shown are bypassed.
@@ -105,21 +106,35 @@ public:
     // EQ slope = filter type (order matches the choice parameter / combo box)
     // (the last real type is called NotchFilter so it doesn't hide struct Notch below)
     // Modules of the processing chain (ids used by the editor's big buttons).
-    enum Module { ModFeedback = 0, ModEq, ModLimiter, ModGate, NumModules };
+    enum Module { ModFeedback = 0, ModEq, ModLimiter, ModGate, ModGeq, NumModules };
+    using ModuleOrder = std::array<int, NumModules>;
+    static constexpr int kNumOrders = 120;                 // 5! permutations of the modules
+
+    // 31-band graphic EQ (ISO 1/3 octave centres, 20 Hz .. 20 kHz), +/-12 dB per band.
+    static constexpr int    kGeqBands = 31;
+    static constexpr double kGeqQ     = 4.32;              // ~ 1/3 octave bandwidth
+    static constexpr std::array<float, kGeqBands> kGeqFreqs {
+        20.0f, 25.0f, 31.5f, 40.0f, 50.0f, 63.0f, 80.0f, 100.0f, 125.0f, 160.0f, 200.0f,
+        250.0f, 315.0f, 400.0f, 500.0f, 630.0f, 800.0f, 1000.0f, 1250.0f, 1600.0f, 2000.0f,
+        2500.0f, 3150.0f, 4000.0f, 5000.0f, 6300.0f, 8000.0f, 10000.0f, 12500.0f, 16000.0f, 20000.0f };
 
     // "chainOrder" parameter <-> order of the modules (slot 0 runs first).
-    static std::array<int, 4> orderFromIndex (int index)
+    static ModuleOrder orderFromIndex (int index)
     {
-        std::array<int, 4> a { 0, 1, 2, 3 };
-        for (int k = 0; k < juce::jlimit (0, 23, index); ++k)
+        ModuleOrder a {};
+        for (int i = 0; i < NumModules; ++i)
+            a[(size_t) i] = i;
+        for (int k = 0; k < juce::jlimit (0, kNumOrders - 1, index); ++k)
             std::next_permutation (a.begin(), a.end());
         return a;
     }
 
-    static int indexFromOrder (const std::array<int, 4>& order)
+    static int indexFromOrder (const ModuleOrder& order)
     {
-        std::array<int, 4> a { 0, 1, 2, 3 };
-        for (int k = 0; k < 24; ++k)
+        ModuleOrder a {};
+        for (int i = 0; i < NumModules; ++i)
+            a[(size_t) i] = i;
+        for (int k = 0; k < kNumOrders; ++k)
         {
             if (a == order)
                 return k;
@@ -310,6 +325,7 @@ private:
     void updateNotches();                 // depth smoothing + coefficients
     void updateCoeffs (int index);
     void updateEq();                      // once per block
+    void updateGeq();                     // once per block
     void clearAllNotches();
     void publishDisplay();
 
@@ -350,6 +366,9 @@ private:
     std::atomic<float>* pCompMakeup  = nullptr; // dB
     std::atomic<float>* pChainOrder  = nullptr; // order of the 4 modules (0..23)
     std::atomic<float>* pEqGlobalOn  = nullptr; // EQ module on / off (bands only, Gain Out stays active)
+    std::atomic<float>* pGeqOn       = nullptr; // GEQ module on / off
+    std::array<std::atomic<float>*, kGeqBands> pGeqGain {};   // GEQ band gains (dB)
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> geqMix;     // GEQ module on / off crossfade
 
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> eqGlobalMix;   // EQ module on / off
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> fbMix;      // 0 = bypass, 1 = notches
@@ -414,6 +433,13 @@ private:
     std::array<std::array<std::array<Biquad, kMaxEqSections>, kNumEqBands>, 2> eqFilters;
     std::array<int, kNumEqBands> eqCount {};                  // active sections per band
     std::array<std::array<float, 5>, kNumEqBands> eqLast {};  // last freq/gain/q/type/shape seen
+
+    // GEQ: one peaking filter per band, only the bands that are not flat run.
+    std::array<std::array<Biquad, kGeqBands>, 2> geqFilters;  // [channel][band]
+    std::array<float, kGeqBands> geqLast {};                  // last gain seen per band
+    std::array<bool, kGeqBands> geqActive {};
+    std::array<int, kGeqBands> geqIdx {};                     // indices of the active bands
+    int geqNum = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MiniLiveStripProcessor)
 };
