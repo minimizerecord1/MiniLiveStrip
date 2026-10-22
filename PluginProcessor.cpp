@@ -1597,7 +1597,7 @@ juce::Array<juce::File> MiniLiveStripProcessor::listPresets()
     return out;
 }
 
-juce::Result MiniLiveStripProcessor::writeStateTo (const juce::File& file) const
+juce::Result MiniLiveStripProcessor::writeStateTo (const juce::File& file)
 {
     const auto dir = file.getParentDirectory();
     if (const auto res = dir.createDirectory(); res.failed())

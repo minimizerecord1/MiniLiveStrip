@@ -178,7 +178,7 @@ public:
     juce::Result loadPresetFile (const juce::File& file);
     void resetToFactory();                               // every parameter back to its default
     bool applyStateXml (const juce::XmlElement& xml);    // used by setStateInformation and presets
-    juce::Result writeStateTo (const juce::File& file) const;
+    juce::Result writeStateTo (const juce::File& file);
 
     juce::AudioProcessorValueTreeState apvts;
     ParameterHistory history;                 // undo / redo (declared after apvts)
