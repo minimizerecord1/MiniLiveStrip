@@ -340,6 +340,11 @@ private:
     void updateEq();                      // once per block
     void updateGeq();                     // once per block
     void clearAllNotches();
+    void applyNotchRestore();                         // audio thread: adopt the notches of a loaded preset
+    void restoreNotchesFrom (const juce::XmlElement& xml);   // message thread: queue notches from a preset
+    std::unique_ptr<juce::XmlElement> buildStateXml() const; // preset / session XML incl. the notch bank
+    std::array<Notch, kMaxNotches> notchRestore {};
+    std::atomic<bool> notchRestorePending { false };
     void publishDisplay();
 
     //==========================================================================

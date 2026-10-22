@@ -862,6 +862,9 @@ void MiniLiveStripProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     }
     lastReset = resetNow;
 
+    if (notchRestorePending.exchange (false, std::memory_order_acquire))
+        applyNotchRestore();
+
     updateEq();
     {
         // Solo (Pro-Q style): only while the EQ module is on; the soloed band must be on and shown.
@@ -1527,6 +1530,70 @@ void MiniLiveStripProcessor::clearAllNotches()
     publishDisplay();
 }
 
+std::unique_ptr<juce::XmlElement> MiniLiveStripProcessor::buildStateXml() const
+{
+    auto xml = apvts.copyState().createXml();
+    if (xml == nullptr)
+        return nullptr;
+
+    auto* notchXml = xml->createNewChildElement ("NOTCHES");
+    for (int i = 0; i < kMaxNotches; ++i)
+    {
+        const float f = notchFreqDisplay[(size_t) i].load();
+        if (f > 0.0f)
+        {
+            auto* n = notchXml->createNewChildElement ("N");
+            n->setAttribute ("f", (double) f);
+            n->setAttribute ("d", (double) notchDepthDisplay[(size_t) i].load());
+        }
+    }
+
+    return xml;
+}
+
+void MiniLiveStripProcessor::restoreNotchesFrom (const juce::XmlElement& xml)
+{
+    std::array<Notch, kMaxNotches> tmp {};
+    int count = 0;
+
+    if (auto* notchXml = xml.getChildByName ("NOTCHES"))
+    {
+        forEachXmlChildElementWithTagName (*notchXml, e, "N")
+        {
+            if (count >= kMaxNotches)
+                break;
+
+            const float f = (float) e->getDoubleAttribute ("f");
+            const float d = (float) e->getDoubleAttribute ("d");
+            if (f <= 0.0f)
+                continue;
+
+            tmp[(size_t) count++] = Notch { true, f, d, d };
+        }
+    }
+
+    notchRestore = tmp;
+    notchRestorePending.store (true, std::memory_order_release);
+}
+
+void MiniLiveStripProcessor::applyNotchRestore()
+{
+    for (int i = 0; i < kMaxNotches; ++i)
+    {
+        notches[(size_t) i] = notchRestore[(size_t) i];
+
+        if (notches[(size_t) i].active)
+            updateCoeffs (i);
+        else
+            for (auto& ch : filters)
+                ch[(size_t) i].setPassthrough();
+    }
+
+    candidateBin = -1;
+    candidateCount = 0;
+    publishDisplay();
+}
+
 void MiniLiveStripProcessor::publishDisplay()
 {
     for (int i = 0; i < kMaxNotches; ++i)
@@ -1545,7 +1612,7 @@ juce::AudioProcessorEditor* MiniLiveStripProcessor::createEditor()
 
 void MiniLiveStripProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    if (auto xml = apvts.copyState().createXml())
+    if (auto xml = buildStateXml())
         copyXmlToBinary (*xml, destData);
 }
 
@@ -1560,7 +1627,13 @@ bool MiniLiveStripProcessor::applyStateXml (const juce::XmlElement& xml)
     if (! xml.hasTagName (apvts.state.getType()))
         return false;
 
-    apvts.replaceState (juce::ValueTree::fromXml (xml));
+    auto tree = juce::ValueTree::fromXml (xml);
+    for (int i = tree.getNumChildren() - 1; i >= 0; --i)      // the notch bank is not a parameter
+        if (tree.getChild (i).getType().toString() == "NOTCHES")
+            tree.removeChild (i, nullptr);
+
+    apvts.replaceState (tree);
+    restoreNotchesFrom (xml);
 
     // Sessions saved before "EQ Bands" existed had 6 bands: keep all of them shown.
     bool hasVisible = false;
@@ -1603,7 +1676,7 @@ juce::Result MiniLiveStripProcessor::writeStateTo (const juce::File& file)
     if (const auto res = dir.createDirectory(); res.failed())
         return res;
 
-    auto xml = apvts.copyState().createXml();
+    auto xml = buildStateXml();
     if (xml == nullptr)
         return juce::Result::fail ("Nothing to save.");
 
@@ -1639,6 +1712,9 @@ void MiniLiveStripProcessor::resetToFactory()
 {
     for (auto* p : getParameters())
         p->setValueNotifyingHost (p->getDefaultValue());
+
+    notchRestore = {};                                  // factory defaults start with no notches
+    notchRestorePending.store (true, std::memory_order_release);
 
     if (juce::MessageManager::existsAndIsCurrentThread())
         history.clear();
