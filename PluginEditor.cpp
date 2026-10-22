@@ -1579,6 +1579,8 @@ void MiniLiveStripEditor::showPresetMenu()
 
     juce::PopupMenu menu;
     menu.addItem (1, "Save as...");
+    if (currentPresetName.isNotEmpty())
+        menu.addItem (4, "Overwrite \"" + currentPresetName + """);
     menu.addItem (2, "Save as default (opens with this)");
     menu.addItem (3, "Factory defaults");
     menu.addSeparator();
@@ -1597,9 +1599,20 @@ void MiniLiveStripEditor::showPresetMenu()
                             else if (result == 2)
                                 showPresetError (proc.saveDefaultPreset());
                             else if (result == 3)
+                            {
                                 proc.resetToFactory();
+                                currentPresetName = {};
+                            }
+                            else if (result == 4)
+                                savePresetNamed (currentPresetName, false);
                             else if (result >= 100 && result < 100 + presets.size())
-                                showPresetError (proc.loadPresetFile (presets[result - 100]));
+                            {
+                                const auto& file = presets[result - 100];
+                                const auto r = proc.loadPresetFile (file);
+                                if (r.wasOk())
+                                    currentPresetName = file.getFileNameWithoutExtension();
+                                showPresetError (r);
+                            }
                         });
 }
 
@@ -1621,7 +1634,38 @@ void MiniLiveStripEditor::promptSavePreset()
         if (name.isEmpty())
             showPresetError (juce::Result::fail ("Please enter a name for the preset."));
         else
-            showPresetError (proc.savePreset (name));
+            savePresetNamed (name, true);
+    }), true);
+}
+
+void MiniLiveStripEditor::savePresetNamed (const juce::String& name, bool confirmOverwrite)
+{
+    const auto file = MiniLiveStripProcessor::presetFolder().getChildFile (name + ".xml");
+
+    auto doSave = [this, name]
+    {
+        const auto r = proc.savePreset (name);
+        if (r.wasOk())
+            currentPresetName = name;
+        showPresetError (r);
+    };
+
+    if (! confirmOverwrite || ! file.existsAsFile())
+    {
+        doSave();
+        return;
+    }
+
+    auto* confirm = new juce::AlertWindow ("Overwrite preset?",
+                                           "\"" + name + "\" already exists. Overwrite it with the current settings?",
+                                           juce::MessageBoxIconType::WarningIcon);
+    confirm->addButton ("Overwrite", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    confirm->addButton ("Cancel",    0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    confirm->enterModalState (true, juce::ModalCallbackFunction::create ([doSave] (int result)
+    {
+        if (result == 1)
+            doSave();
     }), true);
 }
 

@@ -469,6 +469,8 @@ private:
     LedButton presetBtn;
     void showPresetMenu();
     void promptSavePreset();
+    void savePresetNamed (const juce::String& name, bool confirmOverwrite);
+    juce::String currentPresetName;          // preset last loaded or saved (for "Overwrite")
     LedButton subCloseBtn;                                 // closes the feedback panel
 
     // The four module buttons, indexed by module id (0 Feedback, 1 EQ, 2 Limi / Comp, 3 Gate).
