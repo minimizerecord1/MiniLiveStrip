@@ -170,6 +170,16 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
+    // ---- Presets: XML files in <AppData>/MiniLiveStrip/Presets. "Default.xml" is loaded by every new instance.
+    static juce::File presetFolder();
+    static juce::Array<juce::File> listPresets();        // user presets (Default.xml not included)
+    juce::Result savePreset (const juce::String& name);
+    juce::Result saveDefaultPreset();
+    juce::Result loadPresetFile (const juce::File& file);
+    void resetToFactory();                               // every parameter back to its default
+    bool applyStateXml (const juce::XmlElement& xml);    // used by setStateInformation and presets
+    juce::Result writeStateTo (const juce::File& file) const;
+
     juce::AudioProcessorValueTreeState apvts;
     ParameterHistory history;                 // undo / redo (declared after apvts)
 

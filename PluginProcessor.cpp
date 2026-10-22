@@ -66,6 +66,10 @@ MiniLiveStripProcessor::MiniLiveStripProcessor()
 
     // Undo/redo of every user edit. "reset" is a momentary switch and is not recorded.
     history.attach (*this, juce::StringArray { "reset" });
+
+    // A saved "Default" preset becomes the starting state of every new instance.
+    if (auto xml = juce::parseXML (presetFolder().getChildFile ("Default.xml")))
+        applyStateXml (*xml);
 }
 
 MiniLiveStripProcessor::~MiniLiveStripProcessor()
@@ -1548,23 +1552,96 @@ void MiniLiveStripProcessor::getStateInformation (juce::MemoryBlock& destData)
 void MiniLiveStripProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
-        if (xml->hasTagName (apvts.state.getType()))
-        {
-            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+        applyStateXml (*xml);
+}
 
-            // Sessions saved before "EQ Bands" existed had 6 bands: keep all of them shown.
-            bool hasVisible = false;
-            for (const auto& child : apvts.state)
-                if (child.getProperty ("id").toString() == "eqVisible")
-                    hasVisible = true;
+bool MiniLiveStripProcessor::applyStateXml (const juce::XmlElement& xml)
+{
+    if (! xml.hasTagName (apvts.state.getType()))
+        return false;
 
-            if (! hasVisible)
-                if (auto* p = apvts.getParameter ("eqVisible"))
-                    p->setValueNotifyingHost (p->convertTo0to1 (6.0f));
+    apvts.replaceState (juce::ValueTree::fromXml (xml));
 
-            if (juce::MessageManager::existsAndIsCurrentThread())
-                history.clear();          // a loaded preset starts a fresh undo history
-        }
+    // Sessions saved before "EQ Bands" existed had 6 bands: keep all of them shown.
+    bool hasVisible = false;
+    for (const auto& child : apvts.state)
+        if (child.getProperty ("id").toString() == "eqVisible")
+            hasVisible = true;
+
+    if (! hasVisible)
+        if (auto* p = apvts.getParameter ("eqVisible"))
+            p->setValueNotifyingHost (p->convertTo0to1 (6.0f));
+
+    if (juce::MessageManager::existsAndIsCurrentThread())
+        history.clear();          // a loaded preset starts a fresh undo history
+
+    return true;
+}
+
+//==============================================================================
+// Presets
+
+juce::File MiniLiveStripProcessor::presetFolder()
+{
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+               .getChildFile ("MiniLiveStrip")
+               .getChildFile ("Presets");
+}
+
+juce::Array<juce::File> MiniLiveStripProcessor::listPresets()
+{
+    juce::Array<juce::File> out;
+    for (const auto& f : presetFolder().findChildFiles (juce::File::findFiles, false, "*.xml"))
+        if (f.getFileName() != "Default.xml")
+            out.add (f);
+    return out;
+}
+
+juce::Result MiniLiveStripProcessor::writeStateTo (const juce::File& file) const
+{
+    const auto dir = file.getParentDirectory();
+    if (const auto res = dir.createDirectory(); res.failed())
+        return res;
+
+    auto xml = apvts.copyState().createXml();
+    if (xml == nullptr)
+        return juce::Result::fail ("Nothing to save.");
+
+    if (! xml->writeTo (file))
+        return juce::Result::fail ("Could not write the preset file.");
+
+    return juce::Result::ok();
+}
+
+juce::Result MiniLiveStripProcessor::savePreset (const juce::String& name)
+{
+    return writeStateTo (presetFolder().getChildFile (name + ".xml"));
+}
+
+juce::Result MiniLiveStripProcessor::saveDefaultPreset()
+{
+    return writeStateTo (presetFolder().getChildFile ("Default.xml"));
+}
+
+juce::Result MiniLiveStripProcessor::loadPresetFile (const juce::File& file)
+{
+    auto xml = juce::parseXML (file);
+    if (xml == nullptr)
+        return juce::Result::fail ("Could not read the preset file.");
+
+    if (! applyStateXml (*xml))
+        return juce::Result::fail ("This file is not a Mini Live Strip preset.");
+
+    return juce::Result::ok();
+}
+
+void MiniLiveStripProcessor::resetToFactory()
+{
+    for (auto* p : getParameters())
+        p->setValueNotifyingHost (p->getDefaultValue());
+
+    if (juce::MessageManager::existsAndIsCurrentThread())
+        history.clear();
 }
 
 //==============================================================================

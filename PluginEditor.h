@@ -466,6 +466,9 @@ private:
     LedButton scanBtn, growthBtn, resetBtn;
     SoloButton bandSoloBtn;                                 // SOLO for the selected EQ band (inside the popup)
     LedButton fbBtn, undoBtn, redoBtn;
+    LedButton presetBtn;
+    void showPresetMenu();
+    void promptSavePreset();
     LedButton subCloseBtn;                                 // closes the feedback panel
 
     // The four module buttons, indexed by module id (0 Feedback, 1 EQ, 2 Limi / Comp, 3 Gate).

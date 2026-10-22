@@ -1254,6 +1254,11 @@ MiniLiveStripEditor::MiniLiveStripEditor (MiniLiveStripProcessor& p)
     redoBtn.onClick = [this] { proc.history.redo(); };
     addAndMakeVisible (redoBtn);
 
+    presetBtn.setLabel ("PRESET");
+    presetBtn.setColourOn (kAccent);
+    presetBtn.onClick = [this] { showPresetMenu(); };
+    addAndMakeVisible (presetBtn);
+
     // ---- EQ bands: only the knobs live here, inside the popup above the selected point.
     pEqVisible = apvts.getParameter ("eqVisible");
     pEqOn      = apvts.getParameter ("eqOn");
@@ -1556,6 +1561,70 @@ void MiniLiveStripEditor::timerCallback()
     repaint (displayArea);
 }
 
+namespace
+{
+    void showPresetError (const juce::Result& r)
+    {
+        if (r.wasOk())
+            return;
+
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
+                                                "Mini Live Strip", r.getErrorMessage());
+    }
+}
+
+void MiniLiveStripEditor::showPresetMenu()
+{
+    const auto presets = MiniLiveStripProcessor::listPresets();
+
+    juce::PopupMenu menu;
+    menu.addItem (1, "Save as...");
+    menu.addItem (2, "Save as default (opens with this)");
+    menu.addItem (3, "Factory defaults");
+    menu.addSeparator();
+
+    if (presets.isEmpty())
+        menu.addItem (999, "(no saved presets)", false);
+
+    for (int i = 0; i < presets.size(); ++i)
+        menu.addItem (100 + i, presets[i].getFileNameWithoutExtension());
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&presetBtn),
+                        [this, presets] (int result)
+                        {
+                            if (result == 1)
+                                promptSavePreset();
+                            else if (result == 2)
+                                showPresetError (proc.saveDefaultPreset());
+                            else if (result == 3)
+                                proc.resetToFactory();
+                            else if (result >= 100 && result < 100 + presets.size())
+                                showPresetError (proc.loadPresetFile (presets[result - 100]));
+                        });
+}
+
+void MiniLiveStripEditor::promptSavePreset()
+{
+    auto* aw = new juce::AlertWindow ("Save preset", "Preset name:", juce::MessageBoxIconType::NoIcon);
+    aw->addTextEditor ("name", "", "");
+    aw->addButton ("Save",   1, juce::KeyPress (juce::KeyPress::returnKey));
+    aw->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    aw->enterModalState (true, juce::ModalCallbackFunction::create ([this, aw] (int result)
+    {
+        if (result != 1)
+            return;
+
+        auto name = aw->getTextEditorContents ("name").trim();
+        name = name.removeCharacters ("\\/:*?\"<>|");
+
+        if (name.isEmpty())
+            showPresetError (juce::Result::fail ("Please enter a name for the preset."));
+        else
+            showPresetError (proc.savePreset (name));
+    }), true);
+}
+
 void MiniLiveStripEditor::resized()
 {
     auto r = getLocalBounds().reduced (10);
@@ -1585,6 +1654,7 @@ void MiniLiveStripEditor::resized()
     // Undo / redo: top left inside the analyser.
     undoBtn.setBounds (displayArea.getX() + 8, displayArea.getY() + 8, 56, 20);
     redoBtn.setBounds (undoBtn.getRight() + 4, undoBtn.getY(), 56, 20);
+    presetBtn.setBounds (displayArea.getRight() - 8 - 64, displayArea.getY() + 8, 64, 20);
 
     // Module buttons: bottom left inside the analyser, just above the frequency labels.
     // GAIN IN knob first (signal enters here), then the four modules.
