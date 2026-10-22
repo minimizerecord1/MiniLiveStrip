@@ -1580,7 +1580,7 @@ void MiniLiveStripEditor::showPresetMenu()
     juce::PopupMenu menu;
     menu.addItem (1, "Save as...");
     if (currentPresetName.isNotEmpty())
-        menu.addItem (4, "Overwrite \"" + currentPresetName + """);
+        menu.addItem (4, juce::String ("Overwrite \"") + currentPresetName + juce::String ("\""));
     menu.addItem (2, "Save as default (opens with this)");
     menu.addItem (3, "Factory defaults");
     menu.addSeparator();
